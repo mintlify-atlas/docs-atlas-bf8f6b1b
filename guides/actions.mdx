@@ -46,8 +46,8 @@ Inside an action handler, `ctx` provides the following:
 | `ctx.runMutation(ref, args)` | Run a mutation in its own transaction. Each call is an independent atomic operation. |
 | `ctx.runAction(ref, args)` | Call another action. Useful for composing action logic. |
 | `ctx.auth` | Authentication context. Same `Auth` interface as queries and mutations. |
-| `ctx.scheduler` | Schedule future function execution. *(Planned)* |
-| `ctx.storage` | File storage access with upload, download, and delete. *(Planned)* |
+| `ctx.scheduler` | Schedule future function execution. *(Defined in type; implementation planned)* |
+| `ctx.storage` | File storage access with upload, download, delete, and direct blob store. *(Defined in type; implementation planned)* |
 
 Both `ctx.runQuery` and `ctx.runMutation` accept a function reference — the exported result of a `query()`, `mutation()`, or their `internal*` counterparts — and return a typed `Promise`.
 

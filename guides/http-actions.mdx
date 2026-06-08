@@ -8,7 +8,7 @@ HTTP actions let you define custom HTTP endpoints that live outside Baseflare's 
 
 ## Defining an HTTP Action
 
-Use `httpAction` from `baseflare/server` to define a handler. The handler receives two arguments: `ctx`, an `ActionCtx` identical to the one available in regular actions, and `request`, the raw Web API `Request` object. It must return a `Response` (or a `Promise<Response>`).
+Use `httpAction` from `baseflare/server` to define a handler. The handler receives two arguments: `ctx`, an `ActionCtx` identical to the one available in regular actions, and `request`, the raw Web API `Request` object. It must return a `Response` or a `Promise<Response>`.
 
 ```typescript
 import { httpAction } from 'baseflare/server'
@@ -31,8 +31,8 @@ HTTP actions share exactly the same `ActionCtx` as regular actions. That means i
 - **`ctx.runMutation(ref, args)`** — execute a mutation and write to the database.
 - **`ctx.runAction(ref, args)`** — invoke another action, useful for chaining side effects.
 - **`ctx.auth`** — the `Auth` object, where `ctx.auth.getUserIdentity()` returns the authenticated user's identity (or `null` if unauthenticated).
-- **`ctx.scheduler`** — schedule deferred work via `ctx.scheduler.runAfter()` and `ctx.scheduler.runAt()`.
-- **`ctx.storage`** — access file storage via `ctx.storage.store()`, `ctx.storage.getUrl()`, and related methods.
+- **`ctx.scheduler`** _(planned — Phase 7b)_ — schedule deferred work via `ctx.scheduler.runAfter()` and `ctx.scheduler.runAt()`.
+- **`ctx.storage`** _(planned — Phase 7a)_ — access file storage via `ctx.storage.store()`, `ctx.storage.getUrl()`, and related methods.
 
 <Note>
   HTTP actions run in the action context — they do **not** have direct `ctx.db`

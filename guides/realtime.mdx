@@ -1,7 +1,7 @@
 ---
-title: "Real-Time Subscriptions with Durable Objects"
+title: "Real-Time Query Subscriptions with Durable Objects"
 sidebarTitle: "Real-Time"
-description: "Baseflare uses Cloudflare Durable Objects and WebSockets to push query result updates to subscribed clients. Learn the planned real-time architecture and subscription API."
+description: "Durable Objects push live query results over WebSocket in Baseflare. This page details the planned subscription API, wire types, and realtime architecture."
 ---
 
 Baseflare is designed from the ground up to support real-time reactive data. When this feature lands, clients will be able to subscribe to any query and automatically receive updated results whenever the underlying data changes — no polling, no manual cache invalidation, no client-side diffing. Mutations write data and fan out change notifications in the same D1 commit, so subscribers always see a consistent view of the world.
@@ -51,33 +51,34 @@ Each subscription is identified by a `subscriptionId` chosen by the client. This
 The full set of wire types are defined in `packages/baseflare/src/values/rpc.ts`:
 
 ```typescript
+// From packages/baseflare/src/values/rpc.ts
 interface WSSubscribeMessage {
-  type: 'subscribe'
-  query: string
   args: Record<string, unknown>
+  query: string
   subscriptionId: string
+  type: 'subscribe'
 }
 
 interface WSUnsubscribeMessage {
-  type: 'unsubscribe'
   subscriptionId: string
+  type: 'unsubscribe'
 }
 
 interface WSResultEvent {
-  type: 'result'
-  subscriptionId: string
   data: unknown
+  subscriptionId: string
+  type: 'result'
 }
 
 interface WSErrorEvent {
-  type: 'error'
-  subscriptionId: string
   message: string
+  subscriptionId: string
+  type: 'error'
 }
 
 interface WSHeartbeatEvent {
-  type: 'heartbeat'
   timestamp: number
+  type: 'heartbeat'
 }
 ```
 
@@ -86,6 +87,7 @@ interface WSHeartbeatEvent {
 The `@baseflare/react` package (also planned) will expose a `useQuery` hook that manages the full subscription lifecycle transparently. Calling `useQuery` subscribes on mount and unsubscribes when the component unmounts. The hook returns `undefined` while the first result is loading, then stays reactive for the lifetime of the component.
 
 ```typescript
+// Planned API — @baseflare/react is not yet released
 import { useQuery, useMutation } from '@baseflare/react'
 import { api } from '../baseflare/_generated/api'
 

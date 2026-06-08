@@ -160,7 +160,7 @@ The Worker bindings Baseflare requires in the Cloudflare environment object:
 
 | Error type | HTTP status |
 |---|---|
-| `ValidationError` / malformed request | `400 Bad Request` |
+| `ValidationError` / `SchemaError` / malformed request | `400 Bad Request` |
 | Not-found function or route | `404 Not Found` |
 | Permission denied | `403 Forbidden` |
 | Unexpected / unhandled error | `500 Internal Server Error` |

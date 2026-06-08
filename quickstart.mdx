@@ -1,5 +1,5 @@
 ---
-title: "Get Started with Baseflare in Minutes"
+title: "Baseflare Quickstart: Build Your First Worker in 15 Minutes"
 sidebarTitle: "Quickstart"
 description: "Install Baseflare, define a schema and server functions, spin up the Worker runtime, and make your first API calls — all in under 15 minutes."
 ---
@@ -126,27 +126,39 @@ export const createTodo = mutation({
 
 ### Create the Worker
 
-Wire your schema, rules, and functions into a Cloudflare Worker using `createWorker` from `baseflare/server`. The returned object is a standard Cloudflare Workers `fetch` handler with path-based RPC routing already configured.
+Wire your schema, rules, and functions into a Cloudflare Worker using `createWorker` from `baseflare/server`. The manifest requires a `schema` and typed function entry arrays. Each entry provides the function `definition`, an `exportName` (the name used in the source file), a `modulePath` (the module identifier), and a `name` that combines them as `modulePath:exportName`. That combined name becomes the RPC route segment.
 
 ```typescript worker.ts
 import { createWorker } from "baseflare/server";
 
 import { schema } from "./schema";
 import { rules } from "./rules";
-import * as queries from "./queries";
-import * as mutations from "./mutations";
+import { listTodos } from "./queries";
+import { createTodo } from "./mutations";
 
 export default createWorker({
   schema,
   rules,
-  functions: [
-    ...Object.values(queries),
-    ...Object.values(mutations),
+  queryEntries: [
+    {
+      definition: listTodos,
+      exportName: "listTodos",
+      modulePath: "queries",
+      name: "queries:listTodos",
+    },
+  ],
+  mutationEntries: [
+    {
+      definition: createTodo,
+      exportName: "createTodo",
+      modulePath: "mutations",
+      name: "mutations:createTodo",
+    },
   ],
 });
 ```
 
-`createWorker` accepts a `BaseflareManifest` with at minimum a `schema` and your function entries. It builds an internal function index and exposes RPC routes at `/api/query/:name`, `/api/mutation/:name`, and `/api/action/:name`.
+`createWorker` builds an internal function index and exposes RPC routes at `/api/query/:name`, `/api/mutation/:name`, and `/api/action/:name`, where `:name` is the `modulePath:exportName` identifier you provided. The Worker entry point also needs a D1 database binding named `APP_DB` — configure this in your `wrangler.toml` or via the Cloudflare dashboard.
 
 ### Call the API
 
@@ -155,7 +167,7 @@ Once your Worker is running — locally via Wrangler or deployed to Cloudflare �
 **Call `listTodos`:**
 
 ```bash
-curl -X POST http://localhost:8787/api/query/listTodos \
+curl -X POST http://localhost:8787/api/query/queries:listTodos \
   -H "Content-Type: application/json" \
   -d '{"args": {"ownerId": "user_123"}}'
 ```
@@ -178,7 +190,7 @@ curl -X POST http://localhost:8787/api/query/listTodos \
 **Call `createTodo`:**
 
 ```bash
-curl -X POST http://localhost:8787/api/mutation/createTodo \
+curl -X POST http://localhost:8787/api/mutation/mutations:createTodo \
   -H "Content-Type: application/json" \
   -d '{"args": {"ownerId": "user_123", "text": "Ship the Baseflare quickstart"}}'
 ```
@@ -198,5 +210,5 @@ Every RPC request body must be a JSON object with exactly one key — `"args"` �
 </Note>
 
 <Tip>
-  Ready to go deeper? Check out the guides for [schema definition](/concepts#document-model), [queries](/concepts#function-types), [mutations](/concepts#function-types), and [permissions](/concepts#permissions) in the Concepts page.
+  Ready to go deeper? Check out the guides for [schema definition](/guides/schema), [queries](/guides/queries), [mutations](/guides/mutations), and [permissions](/guides/permissions).
 </Tip>

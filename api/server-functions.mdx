@@ -334,3 +334,85 @@ Returned by `ctx.db` in a `MutationCtx`. Extends `DatabaseReader` with write ope
   await ctx.db.delete('todos', id)
   ```
 </ResponseField>
+
+---
+
+## `FunctionReference`
+
+A lightweight branded type used to pass a function definition as a reference to `ctx.runQuery`, `ctx.runMutation`, or `ctx.runAction`. Function definitions created by `query()`, `mutation()`, `action()`, and their internal variants all satisfy this interface automatically.
+
+```typescript
+interface FunctionReference<TArgs, TResult> {
+  readonly __baseflareArgs?: TArgs
+  readonly __baseflareResult?: TResult
+}
+```
+
+---
+
+## Document Utilities
+
+The following utilities are exported from `baseflare/server` for use in custom tooling, testing, or lower-level integrations.
+
+### `serialize(doc)`
+
+Converts a plain document object into the `{ _data: string }` storage form written to the D1 `_data` column. Reserved fields (`_id`, `_createdAt`) are stripped. `Uint8Array` values are base64-encoded under a `$bytes` marker; keys starting with `$` are escaped.
+
+```typescript
+import { serialize } from 'baseflare/server'
+
+function serialize(doc: Record<string, unknown>): { _data: string }
+```
+
+### `deserialize(row)`
+
+Reconstructs a full document object from the raw `{ _id, _data }` row returned by D1. Decodes base64 byte arrays, un-escapes `$`-prefixed keys, and synthesizes `_createdAt` from the ID.
+
+```typescript
+import { deserialize } from 'baseflare/server'
+
+function deserialize(row: {
+  _id: string
+  _data: string
+}): Record<string, unknown> & { _id: string; _createdAt: number }
+```
+
+### `validateInsertData(table, data)`
+
+Validates `data` against a `TableDefinition` for an insert operation. Throws a `ValidationError` if any required field is missing, a field value fails its validator, or a reserved field is present.
+
+```typescript
+import { validateInsertData } from 'baseflare/server'
+
+function validateInsertData(
+  table: TableDefinition,
+  data: DocumentData
+): DocumentData
+```
+
+### `validatePatchData(table, current, patch)`
+
+Validates a partial patch against the stored document. Only the keys present in `patch` are re-validated against their individual field validators. Fields absent from `patch` are preserved unchanged from `current`. Setting a field to `undefined` deletes it (only permitted for optional fields).
+
+```typescript
+import { validatePatchData } from 'baseflare/server'
+
+function validatePatchData(
+  table: TableDefinition,
+  current: DocumentData,
+  patch: DocumentPatch
+): DocumentData
+```
+
+### `validateReplaceData(table, data)`
+
+Validates `data` for a full-document replacement. Identical to `validateInsertData` — all required fields must be present and pass their validators.
+
+```typescript
+import { validateReplaceData } from 'baseflare/server'
+
+function validateReplaceData(
+  table: TableDefinition,
+  data: DocumentData
+): DocumentData
+```

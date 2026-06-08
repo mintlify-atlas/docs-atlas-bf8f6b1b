@@ -33,8 +33,8 @@ The returned builder can be chained with `.index()` calls before being passed to
 Once you have a schema, call `schema.toCreateStatements()` to get the SQL DDL needed to provision your D1 database. The returned array contains one `CREATE TABLE` statement per table followed by one `CREATE INDEX` statement per index.
 
 ```sql
-CREATE TABLE todos (_id TEXT PRIMARY KEY, _data TEXT NOT NULL, _rev INTEGER NOT NULL DEFAULT 0);
-CREATE INDEX todos_by_owner ON todos (json_extract(_data, '$.ownerId'));
+CREATE TABLE todos (_id TEXT PRIMARY KEY, _data TEXT NOT NULL, _rev INTEGER NOT NULL DEFAULT 0 CHECK(_rev >= 0))
+CREATE INDEX todos_by_owner ON todos (json_extract(_data, '$.ownerId'))
 ```
 
 Every table gets three framework-managed columns:

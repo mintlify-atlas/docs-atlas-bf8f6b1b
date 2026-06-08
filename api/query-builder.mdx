@@ -6,9 +6,23 @@ description: "The Baseflare QueryBuilder returned by ctx.db.query() and createQu
 
 `ctx.db.query(table)` returns a `QueryBuilder`. You chain filter, order, and limit methods on it, then terminate the chain with a collector method such as `.collect()`, `.first()`, or `.paginate()`. Under the hood the builder compiles your filter object into a parameterized SQLite `WHERE` clause using `json_extract()` expressions, submits it to D1, deserializes the rows, and runs them through your `read` permission rule before returning results to the handler.
 
-## `createQueryBuilder(table)`
+## `createQueryBuilder(tableName, executor?)`
 
-`createQueryBuilder` is also exported from `baseflare/server` for direct use in utilities or tests. It returns a `QueryBuilder` with an additional `.toSQL()` method so you can inspect the generated SQL without an executor attached:
+`createQueryBuilder` is also exported from `baseflare/server` for direct use in utilities or tests. It accepts an optional `executor` argument that connects the builder to a real database. Without one, the builder exposes additional `.toSQL()` and `.toCountSQL()` methods for SQL inspection but throws if you call any terminal collector method.
+
+```typescript
+import { createQueryBuilder } from 'baseflare/server'
+
+function createQueryBuilder<TDocument extends Record<string, unknown>>(
+  tableName: string,
+  executor?: QueryExecutor<TDocument>
+): QueryBuilder<TDocument> & {
+  toSQL(cursor?: CursorPayload | null): BuiltQuery
+  toCountSQL(): BuiltQuery
+}
+```
+
+**SQL inspection example (no executor):**
 
 ```typescript
 import { createQueryBuilder } from 'baseflare/server'
@@ -26,7 +40,9 @@ const { sql, params } = createQueryBuilder('todos')
 <Note>
   A `QueryBuilder` created via `createQueryBuilder` without an executor is not
   connected to a database. Calling `.collect()` or other terminal methods on it
-  will throw. This variant is intended for SQL inspection and unit tests.
+  will throw. This variant is intended for SQL inspection and unit tests. Permission
+  rules are not applied by the standalone builder — they are enforced at the runtime
+  layer inside `ctx.db.query()`.
 </Note>
 
 ---
@@ -107,7 +123,7 @@ take(n: number): Promise<Doc[]>
 
 ### `.count()`
 
-Return the number of documents matching the current filter. Permission-aware: only documents that pass the `read` rule are counted.
+Return the number of documents matching the current filter. When called through `ctx.db.query()` inside a server function, only documents that pass the `read` permission rule are counted — the runtime scans results through the rule before tallying. When called on a standalone builder created with `createQueryBuilder`, no permission filtering is applied.
 
 ```typescript
 count(): Promise<number>

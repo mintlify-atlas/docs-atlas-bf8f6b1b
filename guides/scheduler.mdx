@@ -1,36 +1,37 @@
 ---
-title: "Schedule Background Jobs with SchedulerDO"
+title: "Background Jobs and Cron Scheduling with Baseflare"
 sidebarTitle: "Scheduler"
-description: "Baseflare plans to provide background job scheduling via a Durable Object with the Cloudflare Alarms API — schedule functions to run after a delay or at an absolute time."
+description: "Baseflare plans ctx.scheduler using a Durable Object and Alarms API — schedule functions after a delay or at a timestamp, with full job history."
 ---
 
 Background job scheduling is a planned feature for Baseflare that will be delivered in Phase 7b of the implementation roadmap. When implemented, `ctx.scheduler` will be available inside mutations and actions, allowing you to schedule any internal function to run after a delay or at a specific future timestamp. Jobs are stored durably in a `SchedulerDO` Durable Object, executed via the Cloudflare Alarms API, and tracked through their full lifecycle from `pending` to `succeeded` or `failed`.
 
-<Note>
+<Warning>
   The scheduler is a **planned feature** in active development and is not yet available in any released version of Baseflare. The API and architecture described on this page reflect the intended design from the Phase 7b implementation plan.
-</Note>
+</Warning>
 
 ## `ctx.scheduler` API
 
-`ctx.scheduler` exposes three methods. All three are available in both mutations and actions. Scheduling a job returns a job ID string that can be stored in your application data and used later to cancel the job if needed.
+`ctx.scheduler` exposes two methods defined in the current type interfaces, with a third (`cancel`) planned for Phase 7b. Both `runAfter` and `runAt` are available in mutations and actions. Scheduling a job returns a job ID string that can be stored in your application data.
 
 ```typescript
-// Run a function after a delay in milliseconds (returns job ID)
+// Planned API — run a function after a delay in milliseconds (returns job ID)
 const jobId = await ctx.scheduler.runAfter(5000, internal.emails.send, {
   to: 'user@example.com',
   subject: 'Welcome!',
 })
 
-// Run at an absolute timestamp — no time limit, can schedule weeks or months ahead
+// Planned API — run at an absolute timestamp (no time limit)
 await ctx.scheduler.runAt(Date.now() + 30 * 86400000, internal.reports.generate, {})
 
-// Cancel a scheduled job before it executes
+// Planned API — cancel a scheduled job before it executes
 await ctx.scheduler.cancel(jobId)
 ```
 
-The `runAfter` and `runAt` methods accept three arguments: the delay in milliseconds or an absolute Unix timestamp, a typed reference to an internal function, and the arguments to pass to that function. The `Scheduler` interface is already defined in `packages/baseflare/src/server/functions/types.ts`:
+The `Scheduler` interface is already defined in `packages/baseflare/src/server/functions/types.ts` with `runAfter` and `runAt`. The `cancel` method is planned as part of the Phase 7b runtime implementation:
 
 ```typescript
+// From packages/baseflare/src/server/functions/types.ts
 interface Scheduler {
   runAfter(
     delayMs: number,
@@ -46,7 +47,20 @@ interface Scheduler {
 }
 ```
 
-The `cancel` method (not yet in the interface) will be added as part of Phase 7b: `ctx.scheduler.cancel(jobId): Promise<void>`.
+<Note>
+  The `cancel` method is **not yet present** in the `Scheduler` interface. It will be added as part of Phase 7b: `ctx.scheduler.cancel(jobId): Promise<void>`.
+</Note>
+
+The `FunctionReference` type used by both methods is a lightweight branded type defined in `functions/types.ts`:
+
+```typescript
+interface FunctionReference<TArgs, TResult> {
+  readonly __baseflareArgs?: TArgs
+  readonly __baseflareResult?: TResult
+}
+```
+
+Codegen produces typed `internal.*` references that satisfy this interface, giving you compile-time safety when passing function references to the scheduler.
 
 ## How It Works
 
@@ -100,7 +114,7 @@ CREATE TABLE jobs (
 Recurring jobs are handled separately from the scheduler. Baseflare plans to support recurring jobs through a `defineCrons()` function that maps cron expressions to internal function references. When you deploy, the CLI reads your crons configuration and creates or updates Cloudflare Cron Triggers for the Worker via the Cloudflare API.
 
 ```typescript
-// baseflare/crons.ts
+// Planned API — baseflare/crons.ts
 import { defineCrons } from 'baseflare/server'
 import { internal } from './_generated/internal'
 
@@ -112,7 +126,7 @@ export default defineCrons({
 })
 ```
 
-When a cron trigger fires, Cloudflare invokes the Worker with a `scheduled` event. Baseflare's Worker runtime handles this event, looks up the matching handler from the crons manifest, and executes it. The `defineCrons()` function is planned as part of Phase 7b alongside `ctx.scheduler`.
+When a cron trigger fires, Cloudflare invokes the Worker with a `scheduled` event. Baseflare's Worker runtime handles this event, looks up the matching handler from the crons manifest, and executes it. The `defineCrons()` function is planned as part of Phase 7b alongside `ctx.scheduler` and does not yet exist in any source file.
 
 During local development, `npx baseflare dev` emulates cron triggers by parsing the `defineCrons()` output, using `cron-parser` to calculate next fire times, and calling the Miniflare Worker's `scheduled()` method at the correct intervals.
 

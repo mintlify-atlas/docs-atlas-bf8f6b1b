@@ -38,7 +38,7 @@ Each table entry can define up to four rule functions, one per operation. All fo
 Called once per document on query results. If the rule returns `false`, that document is **silently excluded** from the result set rather than returning an error. This applies to `.collect()`, `.first()`, `.unique()`, `.take()`, `.count()`, and `.paginate()`, as well as direct `ctx.db.get()` lookups.
 
 ```typescript
-read: ({ ctx, doc }) => doc.ownerId === ctx.auth.getUserIdentity()
+read: async ({ ctx, doc }) => doc.ownerId === (await ctx.auth.getUserIdentity())
 // Arguments: { ctx, doc }
 // doc — the full document being evaluated
 ```
@@ -48,7 +48,7 @@ read: ({ ctx, doc }) => doc.ownerId === ctx.auth.getUserIdentity()
 Called before a document is written by `ctx.db.insert()`. Returning `false` rejects the insert and throws a permission error.
 
 ```typescript
-insert: ({ ctx, value }) => value.ownerId === ctx.auth.getUserIdentity()
+insert: async ({ ctx, value }) => value.ownerId === (await ctx.auth.getUserIdentity())
 // Arguments: { ctx, value }
 // value — the document about to be inserted
 ```
@@ -58,8 +58,8 @@ insert: ({ ctx, value }) => value.ownerId === ctx.auth.getUserIdentity()
 Called before `ctx.db.patch()` or `ctx.db.replace()` is applied. Returning `false` rejects the write.
 
 ```typescript
-update: ({ ctx, existingDoc, value }) =>
-  existingDoc.ownerId === ctx.auth.getUserIdentity()
+update: async ({ ctx, existingDoc, value }) =>
+  existingDoc.ownerId === (await ctx.auth.getUserIdentity())
 // Arguments: { ctx, existingDoc, value }
 // existingDoc — the document as it currently exists in the database
 // value       — the partial (patch) or full (replace) document being written
@@ -70,21 +70,21 @@ update: ({ ctx, existingDoc, value }) =>
 Called before `ctx.db.delete()` removes a document. Returning `false` rejects the deletion.
 
 ```typescript
-delete: ({ ctx, existingDoc }) =>
-  existingDoc.ownerId === ctx.auth.getUserIdentity()
+delete: async ({ ctx, existingDoc }) =>
+  existingDoc.ownerId === (await ctx.auth.getUserIdentity())
 // Arguments: { ctx, existingDoc }
 // existingDoc — the document about to be deleted
 ```
 
 ## `ctx.auth.getUserIdentity()`
 
-The `ctx.auth` object is available in every rule function via the `ctx` property. It exposes `getUserIdentity()`, which returns the identity extracted from the caller's `Authorization: Bearer <token>` header. The runtime populates this automatically — you do not need to parse the header manually.
+The `ctx.auth` object is available in every rule function via the `ctx` property. It exposes `getUserIdentity()`, which returns the identity value for the current caller (typed as `unknown` — the auth system is planned and the concrete return type will be finalized when auth ships). The method may return synchronously or as a `Promise`, so always `await` it:
 
 ```typescript
 const identity = await ctx.auth.getUserIdentity()
 ```
 
-`getUserIdentity()` may return `null` if no token is present or the token is invalid, so rules that require authentication should guard against a `null` identity:
+`getUserIdentity()` may return a falsy value (such as `null` or `undefined`) when no valid token is present, so rules that require authentication should guard against a falsy identity:
 
 ```typescript
 read: async ({ ctx, doc }) => {

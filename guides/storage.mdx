@@ -1,14 +1,14 @@
 ---
-title: "File Storage with R2 and ctx.storage"
+title: "Cloudflare R2 File Storage via ctx.storage in Baseflare"
 sidebarTitle: "Storage"
-description: "Baseflare plans to expose Cloudflare R2 file storage via ctx.storage in mutations and actions — generate upload URLs, store files server-side, and retrieve metadata."
+description: "Baseflare will expose R2 via ctx.storage — generate signed upload URLs, upload blobs, and retrieve file URLs from queries and mutations."
 ---
 
-File storage is a planned feature for Baseflare that will be delivered in Phase 7a of the implementation roadmap. When implemented, `ctx.storage` will be available in mutations and actions, providing a clean API over Cloudflare R2. R2 is used because it is natively integrated with Cloudflare Workers, has zero egress fees, and requires no extra credentials or service accounts — the bucket is provisioned automatically alongside your Worker on first deploy.
+File storage is a planned feature for Baseflare that will be delivered in Phase 7a of the implementation roadmap. When implemented, `ctx.storage` will be available in queries, mutations, and actions, providing a clean API over Cloudflare R2. R2 is used because it is natively integrated with Cloudflare Workers, has zero egress fees, and requires no extra credentials or service accounts — the bucket is provisioned automatically alongside your Worker on first deploy.
 
-<Note>
+<Warning>
   File storage via `ctx.storage` is a **planned feature** in active development and is not yet available in any released version of Baseflare. The API described on this page reflects the intended design from the Phase 7a implementation plan.
-</Note>
+</Warning>
 
 ## Client Upload Flow
 
@@ -19,7 +19,7 @@ The recommended pattern for browser file uploads is a two-step flow. The client 
     Call a mutation that invokes `ctx.storage.generateUploadUrl()`. This returns a short-lived signed URL pointing directly at your R2 bucket. The signed URL is safe to hand to the client.
 
     ```typescript
-    // Step 1: Get a signed upload URL (in a mutation)
+    // Planned API — Step 1: Get a signed upload URL (in a mutation)
     export const generateUploadUrl = mutation({
       args: {},
       returns: v.string(),
@@ -33,7 +33,7 @@ The recommended pattern for browser file uploads is a two-step flow. The client 
     The client receives the signed URL and POSTs the file directly to R2. On success, R2 returns a `storageId` — a stable identifier for the stored object that can be passed back to your backend.
 
     ```typescript
-    // Client-side (browser)
+    // Client-side (browser) — planned API
     const uploadUrl = await createTodo.generateUploadUrl({})
 
     const result = await fetch(uploadUrl, {
@@ -48,7 +48,7 @@ The recommended pattern for browser file uploads is a two-step flow. The client 
     Call a second mutation with the `storageId` to persist the reference alongside your application data. The `storageId` is a plain string — store it in any document field.
 
     ```typescript
-    // Step 3: Save the storageId to a document
+    // Planned API — Step 3: Save the storageId to a document
     export const saveAttachment = mutation({
       args: {
         todoId: v.id('todos'),
@@ -67,6 +67,7 @@ The recommended pattern for browser file uploads is a two-step flow. The client 
 For server-side file handling — downloading a remote file, processing a webhook payload, or importing data — actions can upload directly to R2 using `ctx.storage.store()`. This method accepts a `Blob` and returns the `storageId` for the stored object.
 
 ```typescript
+// Planned API — server-side upload in an action
 export const importFile = action({
   args: { url: v.string() },
   async handler(ctx, args) {
@@ -82,15 +83,43 @@ Note that `ctx.storage.store()` is only available in **actions**, not mutations.
 
 ## Planned `ctx.storage` API
 
-The `ctx.storage` interface is already defined in `packages/baseflare/src/server/functions/types.ts`. The runtime implementation backed by `env.FILES` (the R2 binding) is what remains to be built.
+The `ctx.storage` type interfaces are already defined in `packages/baseflare/src/server/functions/types.ts`. The runtime implementation backed by `env.FILES` (the R2 binding) is what remains to be built as part of Phase 7a.
+
+The source defines three interfaces with a clear inheritance chain:
+
+```typescript
+// From packages/baseflare/src/server/functions/types.ts
+
+interface StorageReader {
+  getUrl(id: string): MaybePromise<string | null>
+}
+
+interface StorageWriter extends StorageReader {
+  delete(id: string): MaybePromise<void>
+  generateUploadUrl(): MaybePromise<string>
+}
+
+interface StorageActionWriter extends StorageWriter {
+  store(blob: Blob): MaybePromise<string>
+}
+```
+
+The context types assign the appropriate storage interface based on function kind:
+
+- `QueryCtx` receives `StorageReader` — read-only access via `getUrl(id)`
+- `MutationCtx` receives `StorageWriter` — adds `generateUploadUrl()` and `delete(id)`
+- `ActionCtx` receives `StorageActionWriter` — adds `store(blob)` for server-side uploads
 
 | Method | Available In | Returns | Description |
 |---|---|---|---|
-| `ctx.storage.generateUploadUrl()` | Mutations | `Promise<string>` | Generates a short-lived signed URL for direct client-to-R2 upload. |
-| `ctx.storage.store(blob)` | Actions | `Promise<string>` | Uploads a `Blob` server-side and returns the storage ID. |
 | `ctx.storage.getUrl(id)` | Queries, Mutations, Actions | `Promise<string \| null>` | Returns a public or signed URL for a stored file, or `null` if the ID does not exist. |
-| `ctx.storage.getMetadata(id)` | Queries, Mutations, Actions | `Promise<{ size, contentType, uploadedAt } \| null>` | Returns file size, content type, and upload timestamp from R2 custom metadata. |
+| `ctx.storage.generateUploadUrl()` | Mutations, Actions | `Promise<string>` | Generates a short-lived signed URL for direct client-to-R2 upload. |
 | `ctx.storage.delete(id)` | Mutations, Actions | `Promise<void>` | Permanently deletes the R2 object. |
+| `ctx.storage.store(blob)` | Actions only | `Promise<string>` | Uploads a `Blob` server-side and returns the storage ID. |
+
+<Note>
+  `ctx.storage.getMetadata(id)` is planned for Phase 7a to return file size, content type, and upload timestamp from R2 custom metadata, but is **not yet defined** in the type interfaces. It will be added to `StorageReader` when the R2 runtime adapter is implemented.
+</Note>
 
 File metadata (size, content type, upload timestamp) will be stored as R2 custom metadata on the object — no separate D1 table is needed. Storage IDs use a flat key namespace within the per-environment R2 bucket.
 

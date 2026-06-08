@@ -1,7 +1,7 @@
 ---
 title: "Baseflare: Cloudflare-Native Backend as a Service"
 sidebarTitle: "Introduction"
-description: "Baseflare is an open-source, self-hosted backend framework that brings Convex-style DX to Cloudflare Workers, D1, R2, and Durable Objects — on your own account."
+description: "MIT-licensed Cloudflare-native backend with Convex-style DX. Typed schema, server functions, deny-by-default permissions — deployed to your own account."
 ---
 
 Baseflare is an open-source, MIT-licensed backend framework that gives you the developer experience of Convex — typed schema, query/mutation/action functions, deny-by-default permissions, and a document database model — but running entirely on your own Cloudflare account. There is no hosted control plane, no vendor between you and your data, and no per-seat pricing. You define your data model and server functions in TypeScript, deploy to Cloudflare Workers, and consume the generated API from your app without assembling a custom backend stack first.
@@ -39,6 +39,7 @@ Baseflare occupies a unique position: it matches Convex's developer experience w
 |---|---|---|---|---|
 | **Runtime** | CF Workers (edge, global) | Custom V8 (single region) | Google Cloud | AWS (single region) |
 | **Database** | D1 (SQLite) | Custom DB | Firestore | Postgres |
+| **Real-time** | Durable Objects + WebSocket | Built-in sync engine | Firestore listeners | Postgres LISTEN/NOTIFY |
 | **Pricing** | $0–5/month flat | $25/seat/month | Unpredictable | $25/month + usage |
 | **Self-hosted** | ✅ Yes (your CF account) | ❌ No | ❌ No | ⚠️ Yes (complex) |
 | **Open source** | ✅ MIT | ❌ No | ❌ No | ✅ Apache 2.0 |

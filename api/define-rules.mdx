@@ -33,19 +33,27 @@ interface TableRules {
 
 ## Rule Operation Signatures
 
+The input types use generics (`TContext`, `TDocument`, `TValue`) so that you can narrow them to your application's specific types. In the Baseflare runtime, the `ctx` value is the live context object created for the surrounding function: a `QueryCtx` for `read`, and a `MutationCtx` for `insert`, `update`, and `delete`.
+
 ### `read`
 
 Called once **per document** when returning results from `ctx.db.get()` or `ctx.db.query()`. Documents for which the rule returns `false` are silently filtered out — they are invisible to the handler.
 
 ```typescript
-read: (input: { ctx: QueryCtx; doc: Doc }) => boolean | Promise<boolean>
+read: (input: ReadRuleInput) => boolean | Promise<boolean>
+
+interface ReadRuleInput<TContext = unknown, TDocument = Record<string, unknown>> {
+  ctx: TContext   // QueryCtx at runtime
+  doc: TDocument  // the candidate document
+}
 ```
 
-<ParamField path="input.ctx" type="QueryCtx">
-  The full query context, including `ctx.auth` and `ctx.db`.
+<ParamField path="input.ctx" type="unknown (QueryCtx at runtime)">
+  The context from the surrounding function call. At runtime this is always a
+  `QueryCtx` object, providing `ctx.auth` and `ctx.db`.
 </ParamField>
 
-<ParamField path="input.doc" type="Doc">
+<ParamField path="input.doc" type="Record<string, unknown>">
   The candidate document being evaluated. Includes all stored fields plus
   `_id` and `_createdAt`.
 </ParamField>
@@ -57,14 +65,19 @@ read: (input: { ctx: QueryCtx; doc: Doc }) => boolean | Promise<boolean>
 Called before a document is written by `ctx.db.insert()`. Receives the validated field values that would be stored.
 
 ```typescript
-insert: (input: { ctx: MutationCtx; value: DocumentData }) => boolean | Promise<boolean>
+insert: (input: InsertRuleInput) => boolean | Promise<boolean>
+
+interface InsertRuleInput<TContext = unknown, TValue = Record<string, unknown>> {
+  ctx: TContext    // MutationCtx at runtime
+  value: TValue   // validated data about to be inserted
+}
 ```
 
-<ParamField path="input.ctx" type="MutationCtx">
-  The full mutation context.
+<ParamField path="input.ctx" type="unknown (MutationCtx at runtime)">
+  The context from the surrounding mutation. At runtime this is a `MutationCtx`.
 </ParamField>
 
-<ParamField path="input.value" type="DocumentData">
+<ParamField path="input.value" type="Record<string, unknown>">
   The validated document data about to be inserted (no `_id` yet).
 </ParamField>
 
@@ -75,22 +88,28 @@ insert: (input: { ctx: MutationCtx; value: DocumentData }) => boolean | Promise<
 Called before a document is modified by `ctx.db.patch()` or `ctx.db.replace()`. Receives both the existing document and the merged/replacement data.
 
 ```typescript
-update: (input: {
-  ctx: MutationCtx
-  existingDoc: Doc
-  value: DocumentData
-}) => boolean | Promise<boolean>
+update: (input: UpdateRuleInput) => boolean | Promise<boolean>
+
+interface UpdateRuleInput<
+  TContext = unknown,
+  TDocument = Record<string, unknown>,
+  TValue = Record<string, unknown>,
+> {
+  ctx: TContext           // MutationCtx at runtime
+  existingDoc: TDocument // current stored document
+  value: TValue          // proposed new document data
+}
 ```
 
-<ParamField path="input.ctx" type="MutationCtx">
-  The full mutation context.
+<ParamField path="input.ctx" type="unknown (MutationCtx at runtime)">
+  The context from the surrounding mutation.
 </ParamField>
 
-<ParamField path="input.existingDoc" type="Doc">
+<ParamField path="input.existingDoc" type="Record<string, unknown>">
   The current document as stored in the database.
 </ParamField>
 
-<ParamField path="input.value" type="DocumentData">
+<ParamField path="input.value" type="Record<string, unknown>">
   The proposed new document data after the patch or replace is applied.
 </ParamField>
 
@@ -101,14 +120,19 @@ update: (input: {
 Called before a document is removed by `ctx.db.delete()`.
 
 ```typescript
-delete: (input: { ctx: MutationCtx; existingDoc: Doc }) => boolean | Promise<boolean>
+delete: (input: DeleteRuleInput) => boolean | Promise<boolean>
+
+interface DeleteRuleInput<TContext = unknown, TDocument = Record<string, unknown>> {
+  ctx: TContext           // MutationCtx at runtime
+  existingDoc: TDocument // document about to be deleted
+}
 ```
 
-<ParamField path="input.ctx" type="MutationCtx">
-  The full mutation context.
+<ParamField path="input.ctx" type="unknown (MutationCtx at runtime)">
+  The context from the surrounding mutation.
 </ParamField>
 
-<ParamField path="input.existingDoc" type="Doc">
+<ParamField path="input.existingDoc" type="Record<string, unknown>">
   The document about to be deleted.
 </ParamField>
 

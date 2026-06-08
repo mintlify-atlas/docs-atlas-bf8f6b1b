@@ -61,6 +61,7 @@ Adds an index to the table definition. Returns a **new** `TableBuilder` with the
 
 - The `fields` object must contain at least one entry.
 - Every field name must match `/^[A-Za-z][A-Za-z0-9_]*$/` and must not start with `_`.
+- The names `AND`, `OR`, and `NOT` are reserved for query filter logic and may not be used as field names.
 - Every value in `fields` must be a Baseflare validator (an object with a `validate` method).
 - For `.index()`: the `fields` array must not be empty.
 - For `.index()`: every listed field name must already exist in the table's field map.

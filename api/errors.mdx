@@ -1,7 +1,7 @@
 ---
-title: "Baseflare Error Classes and Error Codes"
+title: "Error Classes and ErrorCode — Baseflare Values Reference"
 sidebarTitle: "Errors"
-description: "BaseflareError, ValidationError, and SchemaError from baseflare/values — typed errors for application logic, input validation failures, and schema definition problems."
+description: "Reference for BaseflareError, ValidationError, SchemaError, and ErrorCode from baseflare/values — typed errors for application logic and schema issues."
 ---
 
 Baseflare provides three error classes exported from `baseflare/values`, each serving a distinct purpose. `BaseflareError<T>` is for application-level typed errors you throw intentionally in your function handlers — the structured `data` payload propagates to the client intact. `ValidationError` is thrown automatically by validators when input fails a type check, and surfaces to the client as a `VALIDATION_ERROR` response. `SchemaError` is thrown at startup by `defineSchema()` and `defineTable()` when the schema definition is structurally invalid. Understanding which error to use and when is key to building predictable, well-typed APIs with Baseflare.

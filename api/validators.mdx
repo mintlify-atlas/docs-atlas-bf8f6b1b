@@ -1,7 +1,7 @@
 ---
-title: "v — Baseflare Validator Namespace Reference"
+title: "The v Namespace — Baseflare Validator API Reference"
 sidebarTitle: "v (validators)"
-description: "Complete reference for the v namespace from baseflare/values. Covers all primitive, composite, and special validators with their TypeScript types, modifier methods, and usage examples."
+description: "Reference for the v namespace in baseflare/values: all 15 validators, modifier methods, the Validator interface, and exported TypeScript utility types."
 ---
 
 The `v` namespace is exported from `baseflare/values` and is the primary validator toolkit used throughout Baseflare. You use it in `defineTable()` to declare field types, in `query()`, `mutation()`, and `action()` argument shapes to validate incoming data, and in return value contracts to enforce outgoing types. Every validator enforces its constraints at runtime — calling `.validate()` either returns a typed output or throws a `ValidationError` — and simultaneously carries full TypeScript type information so your handlers receive correctly-typed arguments without any extra casting.
@@ -424,4 +424,80 @@ interface Validator<
 
 <ResponseField name="definition" type="ValidatorDefinition">
   The schema definition object carrying the validator's kind, constraints (`min`, `max`, `integer`, `searchable`), and structural metadata (`shape`, `item`, `members`, etc.). This is read by Baseflare's schema differ to compute migrations and by the query engine to enforce schema constraints.
+</ResponseField>
+
+---
+
+## Exported Utility Types
+
+The following TypeScript types are exported from `baseflare/values` alongside the `v` namespace and `Validator` interface.
+
+```typescript
+import type {
+  Infer,
+  InputOf,
+  OutputOf,
+  AnyValidator,
+  NumberValidator,
+  ValidatorKind,
+  ValidatorShape,
+  ValidatorDefinition,
+  ObjectInput,
+  ObjectOutput,
+  Primitive,
+} from 'baseflare/values'
+```
+
+<ResponseField name="Infer<TValidator>" type="type">
+  Extracts the **output** TypeScript type of a validator. Equivalent to `OutputOf<TValidator>`. Use this to derive a type from a validator definition without duplicating the type manually.
+
+  ```typescript
+  const todoFields = v.object({
+    title: v.string(),
+    done:  v.boolean(),
+  })
+
+  type TodoFields = Infer<typeof todoFields>
+  // { title: string; done: boolean }
+  ```
+</ResponseField>
+
+<ResponseField name="InputOf<TValidator>" type="type">
+  Extracts the **input** TypeScript type accepted by a validator — i.e., the type that `.validate()` takes as its first argument. For optional or default-carrying validators this may be wider than the output type (e.g., `string | undefined`).
+</ResponseField>
+
+<ResponseField name="OutputOf<TValidator>" type="type">
+  Extracts the **output** TypeScript type produced by a validator on a successful `.validate()` call. Identical to `Infer<TValidator>`.
+</ResponseField>
+
+<ResponseField name="AnyValidator" type="type">
+  The widest validator type: `Validator<unknown, unknown, ValidatorKind, boolean, boolean>`. Used in generic code that accepts any validator regardless of its specific input/output types.
+</ResponseField>
+
+<ResponseField name="NumberValidator<TInput, TOutput, TOptional, THasDefault>" type="interface">
+  The specialised validator interface returned by `v.number()`. Extends `Validator` with the extra `.integer()` method, and ensures that `.min()`, `.max()`, `.optional()`, `.default()`, and `.searchable()` all return a `NumberValidator` rather than the base `Validator` type.
+</ResponseField>
+
+<ResponseField name="ValidatorKind" type="type">
+  A string union of all recognised validator kinds: `"string" | "number" | "boolean" | "bytes" | "null" | "id" | "array" | "object" | "record" | "union" | "literal" | "enum" | "vector" | "any"`.
+</ResponseField>
+
+<ResponseField name="ValidatorShape" type="type">
+  `Record<string, AnyValidator>` — the type of the `shape` argument to `v.object()`.
+</ResponseField>
+
+<ResponseField name="ValidatorDefinition" type="interface">
+  The plain-object schema representation stored on `validator.definition`. Carries `kind`, `optional`, `hasDefault`, `searchable`, and optional constraint fields (`min`, `max`, `integer`, `dimensions`, `tableName`, `value`, `values`, `item`, `members`, `shape`, `recordValue`).
+</ResponseField>
+
+<ResponseField name="ObjectInput<TShape>" type="type">
+  Derives the input object type from a `ValidatorShape`. Required keys are those whose validators do not accept `undefined`; optional keys are those with optional or default validators.
+</ResponseField>
+
+<ResponseField name="ObjectOutput<TShape>" type="type">
+  Derives the output object type from a `ValidatorShape`. Keys backed by an `.optional()` validator are optional in the output; all others are required.
+</ResponseField>
+
+<ResponseField name="Primitive" type="type">
+  `string | number | boolean | null` — the set of JavaScript primitives accepted by `v.literal()`.
 </ResponseField>

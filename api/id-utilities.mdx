@@ -1,7 +1,7 @@
 ---
-title: "ID Utilities — UUIDv7 Generation and Parsing"
+title: "ID Utilities — Baseflare UUIDv7 Generation and Parsing"
 sidebarTitle: "ID Utilities"
-description: "generateId(), getCreatedAtFromId(), and related utilities from baseflare/values for working with Baseflare's UUIDv7 document IDs."
+description: "generateId(), getCreatedAtFromId(), isUuidV7(), and related UUIDv7 utilities from baseflare/values for generating and parsing Baseflare document IDs."
 ---
 
 Baseflare uses plain UUIDv7 strings as document IDs. UUIDv7 is a time-sortable UUID format — the most significant 48 bits encode a Unix millisecond timestamp, which means ordering documents by `_id` is equivalent to ordering them by creation time. Because the timestamp is encoded directly in the ID, Baseflare derives the `_createdAt` field on every document from the ID at read time; no separate timestamp column is stored in the database. All ID utilities are exported from `baseflare/values` and can be used in both server-side handlers and client-side code.

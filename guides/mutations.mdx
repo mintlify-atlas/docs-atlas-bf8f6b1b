@@ -4,7 +4,7 @@ sidebarTitle: "Mutations"
 description: "Mutations are the atomic write primitive in Baseflare. Use ctx.db.insert, patch, replace, and delete to modify documents with full schema validation and permission enforcement."
 ---
 
-Mutations are atomic write operations. They run inside a `MutationCtx` that provides both `ctx.db` (a `DatabaseWriter`, which also implements `DatabaseReader`) and `ctx.auth` for the caller's identity. The Baseflare runtime tracks every read and write that occurs during a mutation, detects conflicts with concurrent writes, and retries the mutation handler when it is safe to do so. Because handlers may be retried, they must be deterministic and free of side effects — network calls, emails, and payment charges belong in `action()`.
+Mutations are atomic write operations. They run inside a `MutationCtx` that provides `ctx.db` (a `DatabaseWriter`, which also implements `DatabaseReader`), `ctx.auth` for the caller's identity, `ctx.runQuery` for calling queries within the mutation, and `ctx.scheduler` and `ctx.storage` for scheduling and file storage *(planned — defined in the type but not yet fully implemented)*. The Baseflare runtime tracks every read and write that occurs during a mutation, detects conflicts with concurrent writes, and retries the mutation handler when it is safe to do so. Because handlers may be retried, they must be deterministic and free of side effects — network calls, emails, and payment charges belong in `action()`.
 
 ## Defining a Mutation
 
@@ -63,13 +63,13 @@ const id = await ctx.db.insert('todos', {
 
 ### `ctx.db.patch(table, id, partial)`
 
-Performs a shallow merge of `partial` into the existing document. Only the fields present in `partial` are changed — all other fields are left untouched. To remove a field, set it to `undefined` in the partial:
+Performs a shallow merge of `partial` into the existing document. Only the fields present in `partial` are changed — all other fields are left untouched. To remove an **optional** field, set it to `undefined` in the partial. Setting a required (non-optional) field to `undefined` throws a validation error:
 
 ```typescript
 // Update one field
 await ctx.db.patch('todos', args.id, { completed: true })
 
-// Remove a field
+// Remove an optional field (field must be declared optional in the schema)
 await ctx.db.patch('todos', args.id, { tags: undefined })
 ```
 

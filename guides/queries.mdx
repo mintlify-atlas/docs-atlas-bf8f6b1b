@@ -4,7 +4,7 @@ sidebarTitle: "Queries"
 description: "Define read-only server functions with query(). Use the fluent query builder to filter, order, paginate, and count documents from D1 with full permission enforcement."
 ---
 
-Queries are read-only server functions that run inside a `QueryCtx`. The context provides `ctx.db` (a `DatabaseReader`) for accessing documents and `ctx.auth` for the caller's identity. Queries cannot write to the database — any attempt to call a write method inside a query is a TypeScript error. Permission rules are enforced automatically: documents that the caller is not allowed to read are silently excluded from results.
+Queries are read-only server functions that run inside a `QueryCtx`. The context provides `ctx.db` (a `DatabaseReader`) for accessing documents, `ctx.auth` for the caller's identity, and `ctx.storage` (a `StorageReader`) for file storage access. Queries cannot write to the database — any attempt to call a write method inside a query is a TypeScript error. Permission rules are enforced automatically: documents that the caller is not allowed to read are silently excluded from results.
 
 ## Defining a Query
 

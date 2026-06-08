@@ -1,7 +1,7 @@
 ---
-title: "Authentication with defineAuth and better-auth"
+title: "Authentication and User Identity with better-auth"
 sidebarTitle: "Auth"
-description: "Baseflare plans to integrate better-auth v1.6 via a custom document adapter, storing auth data in the same D1 tables. ctx.auth provides the current user in all function contexts."
+description: "Baseflare plans better-auth v1.6 via a D1 document adapter. Auth interface with ctx.auth.getUserIdentity() is already typed in the server package today."
 ---
 
 Authentication is a planned feature for Baseflare that will be delivered in Phase 5 of the implementation roadmap. When implemented, Baseflare will integrate [better-auth v1.6](https://www.better-auth.com/) through a custom document model adapter. Auth data — users, sessions, accounts, and verifications — will be stored in your environment's D1 database using the same two-column `_id` / `_data` document format as all other Baseflare tables. This means auth rows live alongside your app data, participate in D1 Time Travel backups, and require no separate database or managed auth service.

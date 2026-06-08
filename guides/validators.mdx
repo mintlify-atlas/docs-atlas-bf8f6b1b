@@ -64,7 +64,7 @@ Validators expose chainable modifier methods. All modifiers return a new validat
 | `.default(value)` | All | Field is optional in input but always present in output (uses `value` when `undefined`) |
 | `.min(n)` | `string`, `number`, `array`, `bytes`, `vector` | Minimum length (for strings/arrays/bytes/vectors) or minimum value (for numbers) |
 | `.max(n)` | `string`, `number`, `array`, `bytes`, `vector` | Maximum length or maximum value |
-| `.searchable()` | All | Marks the field for full-text search indexing (planned) |
+| `.searchable()` | All | Marks the field for full-text search (sets `searchable: true` in the validator definition) |
 | `.integer()` | `number` only | Value must pass `Number.isSafeInteger` |
 
 ```typescript
