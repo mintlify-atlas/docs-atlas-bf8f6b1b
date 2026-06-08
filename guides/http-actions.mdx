@@ -1,0 +1,107 @@
+---
+title: "Handle Custom HTTP Requests with httpAction"
+sidebarTitle: "HTTP Actions"
+description: "httpAction() creates a custom HTTP handler that receives a full Request and returns a Response. Use it for webhooks, file uploads, and non-RPC endpoints."
+---
+
+HTTP actions let you define custom HTTP endpoints that live outside Baseflare's RPC system. While queries and mutations are invoked via `POST /api/query/:name` and `POST /api/mutation/:name`, HTTP actions handle arbitrary HTTP requests — webhooks from Stripe or GitHub, custom REST endpoints, file upload handlers, or any other use case where you need full control over the request and response lifecycle.
+
+## Defining an HTTP Action
+
+Use `httpAction` from `baseflare/server` to define a handler. The handler receives two arguments: `ctx`, an `ActionCtx` identical to the one available in regular actions, and `request`, the raw Web API `Request` object. It must return a `Response` (or a `Promise<Response>`).
+
+```typescript
+import { httpAction } from 'baseflare/server'
+
+export const stripeWebhook = httpAction(async (ctx, request) => {
+  const body = await request.json()
+  // process webhook...
+  await ctx.runMutation(processPayment, { payload: body })
+  return new Response('ok', { status: 200 })
+})
+```
+
+The `httpAction` call wraps the handler in a typed `HttpAction` object. This object is what you pass to `router.route()` when registering the endpoint — the raw handler function is not passed directly.
+
+## ActionCtx in HTTP Actions
+
+HTTP actions share exactly the same `ActionCtx` as regular actions. That means inside your handler you have access to:
+
+- **`ctx.runQuery(ref, args)`** — execute a query and read data from the database.
+- **`ctx.runMutation(ref, args)`** — execute a mutation and write to the database.
+- **`ctx.runAction(ref, args)`** — invoke another action, useful for chaining side effects.
+- **`ctx.auth`** — the `Auth` object, where `ctx.auth.getUserIdentity()` returns the authenticated user's identity (or `null` if unauthenticated).
+- **`ctx.scheduler`** — schedule deferred work via `ctx.scheduler.runAfter()` and `ctx.scheduler.runAt()`.
+- **`ctx.storage`** — access file storage via `ctx.storage.store()`, `ctx.storage.getUrl()`, and related methods.
+
+<Note>
+  HTTP actions run in the action context — they do **not** have direct `ctx.db`
+  access. All database reads and writes must go through `ctx.runQuery()` and
+  `ctx.runMutation()`. This keeps the transaction boundary clear and prevents
+  long-running HTTP handlers from holding open database locks.
+</Note>
+
+## Returning Responses
+
+Because HTTP actions return a standard Web API `Response`, you have full control over the status code, headers, and body format.
+
+```typescript
+// JSON response
+return new Response(JSON.stringify({ success: true }), {
+  status: 200,
+  headers: { 'Content-Type': 'application/json' },
+})
+
+// Plain text response
+return new Response('ok', { status: 200 })
+
+// Error response
+return new Response('Unauthorized', { status: 401 })
+
+// Redirect
+return Response.redirect('https://example.com', 302)
+```
+
+You can also return any body format supported by the `Response` constructor — JSON, plain text, binary data, or a `ReadableStream` for streaming responses.
+
+## Registering HTTP Actions
+
+An `httpAction` handler by itself is not accessible over HTTP. You must register it on an `HttpRouter` by calling `router.route()` or `router.routeWithPrefix()`. The router maps HTTP method and path combinations to your handlers and is passed to `createWorker` as part of your Worker manifest.
+
+```typescript
+import { httpRouter } from 'baseflare/server'
+import { stripeWebhook } from './webhooks'
+
+const http = httpRouter()
+
+http.route({
+  path: '/webhooks/stripe',
+  method: 'POST',
+  handler: stripeWebhook,
+})
+
+export default http
+```
+
+See the [HTTP Router guide](/guides/http-router) for the full routing API, including prefix matching and multi-route setups.
+
+<Tip>
+  Always validate the webhook signature before calling any mutation. For Stripe,
+  verify the `Stripe-Signature` header using the raw request body before passing
+  any payload to `ctx.runMutation()`. Processing an unverified payload can allow
+  replay attacks or forged events.
+
+  ```typescript
+  export const stripeWebhook = httpAction(async (ctx, request) => {
+    const signature = request.headers.get('stripe-signature')
+    const body = await request.text()
+
+    if (!isValidStripeSignature(body, signature)) {
+      return new Response('Unauthorized', { status: 401 })
+    }
+
+    await ctx.runMutation(processPayment, { payload: JSON.parse(body) })
+    return new Response('ok', { status: 200 })
+  })
+  ```
+</Tip>

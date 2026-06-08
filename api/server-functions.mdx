@@ -1,0 +1,336 @@
+---
+title: "query, mutation, action — Baseflare Server Function Reference"
+sidebarTitle: "Server Functions"
+description: "Complete reference for query(), mutation(), action(), and their internal variants. Documents FunctionDefinitionConfig, context types QueryCtx/MutationCtx/ActionCtx, and return value validation."
+---
+
+Baseflare has six server function constructors. The public trio — `query`, `mutation`, and `action` — defines functions callable from client SDKs via the RPC routes. The internal trio — `internalQuery`, `internalMutation`, and `internalAction` — defines server-only functions that are never exposed over HTTP but can be composed together using `ctx.runQuery`, `ctx.runMutation`, and `ctx.runAction`. All six share the same `FunctionDefinitionConfig` shape and are exported from `baseflare/server`.
+
+## `FunctionDefinitionConfig<TArgs, TReturns, TCtx>`
+
+Every function constructor accepts a single config object:
+
+<ParamField path="args" type="ValidatorShape" required>
+  A plain object mapping argument names to validators from `v.*`. The inferred
+  object type becomes the `args` parameter of `handler`. All arguments are
+  validated at the RPC boundary before the handler is called.
+</ParamField>
+
+<ParamField path="returns" type="AnyValidator">
+  Optional validator for the handler's return value. When provided, the return
+  value is validated at runtime before being sent back to the caller. If omitted,
+  the return value is passed through as-is.
+</ParamField>
+
+<ParamField path="handler" type="(ctx: TCtx, args: InferredArgs) => Promise<T>" required>
+  The async function that implements the operation. Receives a typed context object
+  and the validated `args`. May be synchronous or async.
+</ParamField>
+
+---
+
+## `query(config)`
+
+Defines a **public, read-only** server function. Queries have access to `ctx.db` as a `DatabaseReader` but cannot write. They are invoked by the client via `POST /api/query/:name`.
+
+```typescript
+function query<
+  TArgs extends ValidatorShape,
+  TReturns extends AnyValidator | undefined = undefined,
+>(
+  config: FunctionDefinitionConfig<TArgs, TReturns, QueryCtx>
+): QueryDefinition<TArgs, TReturns>
+```
+
+**Example:**
+
+```typescript
+import { query } from 'baseflare/server'
+import { v } from 'baseflare/values'
+
+export const getTodo = query({
+  args: { id: v.string() },
+  handler: async (ctx, { id }) => {
+    return ctx.db.get('todos', id)
+  },
+})
+```
+
+---
+
+## `mutation(config)`
+
+Defines a **public, read-write** server function. Mutations run inside a serializable transaction and have access to `ctx.db` as a `DatabaseWriter`. They are invoked by the client via `POST /api/mutation/:name`.
+
+```typescript
+function mutation<
+  TArgs extends ValidatorShape,
+  TReturns extends AnyValidator | undefined = undefined,
+>(
+  config: FunctionDefinitionConfig<TArgs, TReturns, MutationCtx>
+): MutationDefinition<TArgs, TReturns>
+```
+
+<Tip>
+  Mutation handlers should be deterministic and retry-safe. If a mutation is
+  retried due to a transient D1 error, the handler will be called again with the
+  same arguments.
+</Tip>
+
+**Example:**
+
+```typescript
+import { mutation } from 'baseflare/server'
+import { v } from 'baseflare/values'
+
+export const createTodo = mutation({
+  args: {
+    text: v.string().min(1).max(280),
+    ownerId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    return ctx.db.insert('todos', {
+      text: args.text,
+      ownerId: args.ownerId,
+      completed: false,
+    })
+  },
+})
+```
+
+---
+
+## `action(config)`
+
+Defines a **public** server function that can run arbitrary async logic, call third-party APIs, and orchestrate other functions. Actions do **not** have direct database access — all DB work must go through `ctx.runQuery()` or `ctx.runMutation()`. They are invoked by the client via `POST /api/action/:name`.
+
+```typescript
+function action<
+  TArgs extends ValidatorShape,
+  TReturns extends AnyValidator | undefined = undefined,
+>(
+  config: FunctionDefinitionConfig<TArgs, TReturns, ActionCtx>
+): ActionDefinition<TArgs, TReturns>
+```
+
+<Warning>
+  Action handlers do not have `ctx.db`. All database access from an action must
+  go through `ctx.runQuery()` or `ctx.runMutation()`.
+</Warning>
+
+**Example:**
+
+```typescript
+import { action, internalMutation } from 'baseflare/server'
+import { v } from 'baseflare/values'
+
+export const sendInvite = action({
+  args: { email: v.string(), workspaceId: v.string() },
+  handler: async (ctx, { email, workspaceId }) => {
+    // Call a third-party API
+    await fetch('https://api.email.example/send', {
+      method: 'POST',
+      body: JSON.stringify({ to: email, template: 'invite' }),
+    })
+    // Persist the result via a mutation
+    await ctx.runMutation(recordInviteSent, { email, workspaceId })
+  },
+})
+```
+
+---
+
+## `internalQuery`, `internalMutation`, `internalAction`
+
+The internal variants have identical signatures to their public counterparts but are registered with `visibility: "internal"`. They are **never reachable** via the `/api/query/`, `/api/mutation/`, or `/api/action/` RPC routes — they can only be called server-side using `ctx.runQuery`, `ctx.runMutation`, or `ctx.runAction`.
+
+Use internal functions to decompose complex logic, share database access patterns, or expose helper functions that should not be callable by clients.
+
+```typescript
+import { internalQuery, internalMutation, internalAction } from 'baseflare/server'
+
+// Only callable from another server function via ctx.runQuery(getUser, { id })
+export const getUser = internalQuery({
+  args: { id: v.string() },
+  handler: async (ctx, { id }) => ctx.db.get('users', id),
+})
+
+export const archiveWorkspace = internalMutation({
+  args: { workspaceId: v.string() },
+  handler: async (ctx, { workspaceId }) => {
+    // ...
+  },
+})
+
+export const syncExternalData = internalAction({
+  args: { source: v.string() },
+  handler: async (ctx, { source }) => {
+    // ...
+  },
+})
+```
+
+---
+
+## Context Types
+
+### `QueryCtx`
+
+Available inside `query` and `internalQuery` handlers.
+
+<ResponseField name="ctx.db" type="DatabaseReader">
+  Read-only database access. See [DatabaseReader](#databasereader) below.
+</ResponseField>
+
+<ResponseField name="ctx.auth" type="Auth">
+  Authentication context. Call `ctx.auth.getUserIdentity()` to retrieve the
+  caller's identity from the incoming request.
+</ResponseField>
+
+<ResponseField name="ctx.storage" type="StorageReader">
+  Read-only file storage. Call `ctx.storage.getUrl(id)` to retrieve a presigned
+  download URL for a stored object.
+</ResponseField>
+
+---
+
+### `MutationCtx`
+
+Available inside `mutation` and `internalMutation` handlers. Extends `QueryCtx`.
+
+<ResponseField name="ctx.db" type="DatabaseWriter">
+  Read and write database access. See [DatabaseWriter](#databasewriter) below.
+</ResponseField>
+
+<ResponseField name="ctx.auth" type="Auth">
+  Authentication context.
+</ResponseField>
+
+<ResponseField name="ctx.runQuery(ref, args)" type="Promise<TResult>">
+  Run a query within the mutation context. Useful for reading data as part of
+  a read-modify-write pattern.
+</ResponseField>
+
+<ResponseField name="ctx.scheduler" type="Scheduler">
+  Schedule a function to run in the future. Call `ctx.scheduler.runAfter(delayMs, ref, args)`
+  or `ctx.scheduler.runAt(timestamp, ref, args)`. Returns a job ID string. *(Planned)*
+</ResponseField>
+
+<ResponseField name="ctx.storage" type="StorageWriter">
+  Read and write file storage. Extends `StorageReader` with `generateUploadUrl()`
+  and `delete(id)`. *(Planned)*
+</ResponseField>
+
+---
+
+### `ActionCtx`
+
+Available inside `action` and `internalAction` handlers. Does **not** include `ctx.db`.
+
+<ResponseField name="ctx.runQuery(ref, args)" type="Promise<TResult>">
+  Run a query (read-only database access) from within an action.
+</ResponseField>
+
+<ResponseField name="ctx.runMutation(ref, args)" type="Promise<TResult>">
+  Run a mutation from within an action. Each `runMutation` call is its own
+  serializable transaction.
+</ResponseField>
+
+<ResponseField name="ctx.runAction(ref, args)" type="Promise<TResult>">
+  Run another action from within an action.
+</ResponseField>
+
+<ResponseField name="ctx.auth" type="Auth">
+  Authentication context.
+</ResponseField>
+
+<ResponseField name="ctx.scheduler" type="Scheduler">
+  Schedule a function to run in the future. *(Planned)*
+</ResponseField>
+
+<ResponseField name="ctx.storage" type="StorageActionWriter">
+  Read, write, and directly store blobs. Extends `StorageWriter` with
+  `store(blob: Blob)`. *(Planned)*
+</ResponseField>
+
+---
+
+## `DatabaseReader`
+
+Returned by `ctx.db` in a `QueryCtx`. Provides read-only access to the D1 database.
+
+<ResponseField name="get(table, id)" type="Promise<Doc | null>">
+  Fetch a single document by its `_id`. Returns `null` if no document exists
+  with that ID. Permission rules are applied — a document that fails the `read`
+  rule is treated as if it does not exist.
+
+  ```typescript
+  const todo = await ctx.db.get('todos', id)
+  ```
+</ResponseField>
+
+<ResponseField name="query(table)" type="QueryBuilder">
+  Begin a fluent query against the given table. Chain `.filter()`, `.order()`,
+  `.limit()`, then terminate with `.collect()`, `.first()`, `.paginate()`, etc.
+  See the [QueryBuilder reference](/api/query-builder).
+
+  ```typescript
+  const todos = await ctx.db.query('todos')
+    .filter({ ownerId: userId, completed: false })
+    .order('asc')
+    .collect()
+  ```
+</ResponseField>
+
+---
+
+## `DatabaseWriter`
+
+Returned by `ctx.db` in a `MutationCtx`. Extends `DatabaseReader` with write operations.
+
+<ResponseField name="insert(table, doc)" type="Promise<string>">
+  Insert a new document. The `doc` object must conform to the table's field
+  validators. Returns the new document's `_id` string.
+
+  ```typescript
+  const id = await ctx.db.insert('todos', {
+    text: 'Buy milk',
+    ownerId: userId,
+    completed: false,
+  })
+  ```
+</ResponseField>
+
+<ResponseField name="patch(table, id, partial)" type="Promise<void>">
+  Shallow-merge `partial` into the existing document. Fields set to `undefined`
+  in the patch are **deleted** from the document (only allowed if the field is
+  optional in the schema). Fields not mentioned in `partial` are unchanged.
+
+  ```typescript
+  await ctx.db.patch('todos', id, { completed: true })
+  // Remove an optional field:
+  await ctx.db.patch('todos', id, { editedAt: undefined })
+  ```
+</ResponseField>
+
+<ResponseField name="replace(table, id, doc)" type="Promise<void>">
+  Fully replace the document. The replacement `doc` must pass complete schema
+  validation — all required fields must be present.
+
+  ```typescript
+  await ctx.db.replace('todos', id, {
+    text: 'Buy oat milk',
+    ownerId: userId,
+    completed: false,
+  })
+  ```
+</ResponseField>
+
+<ResponseField name="delete(table, id)" type="Promise<void>">
+  Delete the document with the given `_id`. The `delete` permission rule is
+  evaluated before deletion.
+
+  ```typescript
+  await ctx.db.delete('todos', id)
+  ```
+</ResponseField>

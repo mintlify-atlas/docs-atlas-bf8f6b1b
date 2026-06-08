@@ -1,0 +1,157 @@
+---
+title: "defineConfig() — Validate Baseflare Project Configuration"
+sidebarTitle: "defineConfig"
+description: "defineConfig() validates and returns a BaseflareConfig object. Use it in baseflare.config.ts to declare your project name, CORS policy, request limits, and Cloudflare Worker settings."
+---
+
+`defineConfig` is exported from `baseflare/server` and is intended for exclusive use in `baseflare.config.ts` at the root of your project. It validates every field in the configuration object at module load time — throwing a descriptive `Error` for any invalid value — and returns the object typed as `BaseflareConfig`. The config is consumed by both the CLI (for Cloudflare resource naming, Worker bundling, and deployment) and by the runtime (for CORS handling and request limits).
+
+## Signature
+
+```typescript
+function defineConfig(config: BaseflareConfig): BaseflareConfig
+```
+
+---
+
+## `BaseflareConfig` Fields
+
+<ParamField path="project" type="string" required>
+  A non-empty project name slug. Used to name every Cloudflare resource Baseflare
+  manages: the D1 database, the Worker script, and related resources are named
+  `bf-{project}-{env}`. Must be a non-empty string after trimming whitespace.
+</ParamField>
+
+<ParamField path="functions" type="string">
+  Path to the functions directory, relative to the project root. The CLI scans
+  this directory to discover `query`, `mutation`, `action`, and their internal
+  variants when auto-generating the Worker entry point.
+
+  **Default:** `'baseflare'`
+</ParamField>
+
+<ParamField path="external" type="readonly string[]">
+  Packages to exclude from Worker bundling. Entries must be non-empty strings.
+  Use this to prevent large Node.js-only packages from being bundled into the
+  Worker when they are supplied by the Cloudflare runtime or are truly unused
+  at runtime.
+</ParamField>
+
+<ParamField path="cors" type="BaseflareCorsConfig">
+  CORS configuration. See [`BaseflareCorsConfig`](#baseflarecorsconfig) below.
+</ParamField>
+
+<ParamField path="limits" type="BaseflareLimitsConfig">
+  Request limit configuration. See [`BaseflareLimitsConfig`](#baseflarelimitsconfig) below.
+</ParamField>
+
+<ParamField path="middleware" type="readonly unknown[]">
+  Middleware array. Must be an array if provided. *(Planned feature — the
+  middleware pipeline is not yet implemented.)*
+</ParamField>
+
+<ParamField path="worker" type="BaseflareWorkerConfig">
+  Cloudflare Worker settings. See [`BaseflareWorkerConfig`](#baseflareworkerconfig) below.
+</ParamField>
+
+---
+
+## `BaseflareCorsConfig`
+
+<ParamField path="origins" type="readonly string[]" required>
+  An array of allowed origins. Each entry must be a non-empty string. Pass
+  `['*']` to allow all origins (not recommended in production).
+
+  Example: `['https://myapp.com', 'http://localhost:5173']`
+</ParamField>
+
+<ParamField path="maxAge" type="number">
+  Preflight response cache duration in seconds, sent as the
+  `Access-Control-Max-Age` header. Must be a non-negative integer.
+
+  Example: `86400` (24 hours)
+</ParamField>
+
+---
+
+## `BaseflareLimitsConfig`
+
+<ParamField path="maxQueryResults" type="number">
+  A positive integer cap on the number of rows returned by a single
+  `.collect()` call. Queries that would return more rows are truncated to this
+  limit. Useful for protecting against accidental full-table scans in production.
+</ParamField>
+
+<ParamField path="maxUploadSize" type="string">
+  A non-empty string describing the maximum allowed request body size for file
+  uploads. The string is parsed by the runtime; use familiar size notation such
+  as `'10mb'` or `'50kb'`.
+</ParamField>
+
+---
+
+## `BaseflareWorkerConfig`
+
+<ParamField path="compatibilityDate" type="string">
+  The Cloudflare Workers compatibility date in `YYYY-MM-DD` format. Controls
+  which breaking changes in the Workers runtime are enabled. Passed directly to
+  `wrangler.toml` during deployment.
+
+  Example: `'2026-04-08'`
+</ParamField>
+
+<ParamField path="compatibilityFlags" type="readonly string[]">
+  Additional Cloudflare Workers compatibility flags to enable. Each entry must
+  be a non-empty string.
+
+  <Note>
+    `nodejs_compat` is always injected by Baseflare regardless of what you list
+    here. You do not need to include it explicitly.
+  </Note>
+</ParamField>
+
+---
+
+## Validation
+
+`defineConfig` validates all fields immediately at module load time. Any violation throws an `Error` with a descriptive message pointing at the offending field:
+
+| Field | Validation rule |
+|---|---|
+| `project` | Non-empty string after trimming |
+| `functions` | Non-empty string if provided |
+| `external` | All entries must be non-empty strings |
+| `cors.origins` | All entries must be non-empty strings |
+| `cors.maxAge` | Non-negative integer |
+| `limits.maxQueryResults` | Positive integer |
+| `limits.maxUploadSize` | Non-empty string |
+| `worker.compatibilityDate` | Matches `/^\d{4}-\d{2}-\d{2}$/` |
+| `worker.compatibilityFlags` | Array of non-empty strings |
+
+Unknown keys at any nesting level are also rejected with a `"Unknown option"` error, preventing configuration typos from going unnoticed.
+
+---
+
+## Full Example
+
+```typescript
+import { defineConfig } from 'baseflare/server'
+
+export default defineConfig({
+  project: 'my-app',
+  functions: 'baseflare',
+  external: [],
+  cors: {
+    origins: ['https://myapp.com', 'http://localhost:5173'],
+    maxAge: 86400,
+  },
+  limits: {
+    maxQueryResults: 1000,
+    maxUploadSize: '10mb',
+  },
+  worker: {
+    compatibilityDate: '2026-04-08',
+    compatibilityFlags: [],
+  },
+})
+```

@@ -1,0 +1,207 @@
+---
+title: "Manage Baseflare Environments on Cloudflare"
+sidebarTitle: "Environments"
+description: "Each Baseflare environment is an isolated Cloudflare Worker with its own D1 database, R2 bucket, and Durable Object namespaces. Learn how environments are named and isolated."
+---
+
+Baseflare uses one Worker per environment for true infrastructure isolation. A staging deployment has completely separate D1, R2, and Durable Object resources from production — there is no shared state between environments. When you deploy to a new environment for the first time, the CLI auto-provisions all required Cloudflare resources before uploading any code. Subsequent deploys to the same environment update the Worker and apply schema changes without re-provisioning.
+
+---
+
+## Resource Naming Convention
+
+All Cloudflare resources managed by Baseflare follow a `bf-{project}-{env}` prefix. This prefix lets the CLI distinguish Baseflare-managed resources from any other resources in your Cloudflare account, so destructive operations like `env destroy` can safely target the right set.
+
+| Resource | Name pattern | Example |
+|---|---|---|
+| Worker | `bf-{project}-{env}` | `bf-my-app-production` |
+| D1 database | `bf-{project}-{env}-db` | `bf-my-app-production-db` |
+| R2 bucket | `bf-{project}-{env}-files` | `bf-my-app-production-files` |
+| DO namespace (realtime connections) | `RealtimeConnectionDO` | bound to the Worker |
+| DO namespace (realtime subscriptions) | `RealtimeSubscriptionDO` | bound to the Worker |
+| DO namespace (scheduler) | `SchedulerDO` | bound to the Worker |
+
+For a project named `my-app` deployed to the `production` environment, the resulting resources are:
+
+```
+Worker:      bf-my-app-production
+D1:          bf-my-app-production-db
+R2:          bf-my-app-production-files
+DO:          RealtimeConnectionDO  (bound to bf-my-app-production)
+             RealtimeSubscriptionDO (bound to bf-my-app-production)
+             SchedulerDO            (bound to bf-my-app-production)
+```
+
+Environment names are project-scoped slugs. You can have `staging` and `production` environments under the same project — they share nothing at the infrastructure level.
+
+---
+
+## Environment Registry
+
+The CLI stores a local record of all provisioned environments in `.baseflare/project.json`. This file is generated automatically on first deploy and updated whenever resources are added or modified. It should be added to your `.gitignore` — it contains Cloudflare resource IDs that are specific to your account and are not meant to be shared.
+
+```json
+{
+  "version": 1,
+  "project": { "slug": "my-app" },
+  "cloudflare": { "accountId": "account-id" },
+  "environments": {
+    "production": {
+      "worker": { "name": "bf-my-app-production" },
+      "database": { "id": "d1-database-id", "name": "bf-my-app-production-db" },
+      "bucket": { "name": "bf-my-app-production-files" }
+    }
+  }
+}
+```
+
+Before making any Cloudflare API call, the CLI resolves the `--env <name>` flag through this registry. API calls use stable resource IDs where Cloudflare provides them — names are display values, drift checks, and recovery hints. If the registry file is missing or a named environment is not in it, the CLI falls back to Cloudflare name discovery (`bf-{project}-*`). If multiple matching resources are found during discovery, the CLI fails and asks you to link the environment explicitly by resource ID.
+
+<Info>
+  Add `.baseflare/` to your `.gitignore`. The registry file is generated per-machine and should never be committed to source control.
+</Info>
+
+---
+
+## `BASEFLARE_URL` Environment Variable
+
+The frontend client reads the backend Worker URL from the `BASEFLARE_URL` environment variable. For local development, the CLI automatically writes this value to `.env.local` when you run `npx baseflare dev`:
+
+```bash
+# .env.local (auto-written by `npx baseflare dev`, gitignored)
+BASEFLARE_URL=http://localhost:4510
+```
+
+Your client initialization reads from this variable at build time or runtime depending on your framework:
+
+```typescript
+const client = new BaseflareClient({
+  url: import.meta.env.BASEFLARE_URL,
+})
+```
+
+For deployed environments, set `BASEFLARE_URL` in your hosting platform. Each environment gets its own URL pointing to its own Worker:
+
+<CodeGroup>
+```bash Vercel
+vercel env add BASEFLARE_URL production
+# → https://bf-my-app-production.your-account.workers.dev
+```
+
+```bash Cloudflare Pages
+# Set in Pages project → Settings → Environment variables
+BASEFLARE_URL=https://bf-my-app-production.your-account.workers.dev
+```
+
+```bash CI/CD (GitHub Actions)
+# Set as a repository secret or environment variable
+BASEFLARE_URL=https://bf-my-app-production.your-account.workers.dev
+```
+</CodeGroup>
+
+The `npx baseflare deploy` command prints the environment Worker URL after a successful deploy, making it easy to copy:
+
+```bash
+npx baseflare deploy --env production
+# ✓ Deployed to https://bf-my-app-production.your-account.workers.dev
+```
+
+<Warning>
+  `npx baseflare dev` is the only command that modifies `.env.local`. Deploy commands never touch it, which prevents your frontend from accidentally pointing at a staging or production backend during local development.
+</Warning>
+
+---
+
+## Authentication Credentials
+
+The CLI resolves Cloudflare credentials using the following precedence order:
+
+<Steps>
+  <Step title="Environment variables (CI/CD)">
+    If `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` are set in the environment, the CLI uses them directly. This is the recommended approach for automated pipelines where interactive login is not possible.
+
+    ```bash
+    # GitHub Actions example
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    ```
+  </Step>
+  <Step title="OAuth tokens (interactive)">
+    For local development, `npx baseflare login` opens a browser to the Cloudflare OAuth consent page using Authorization Code Flow with PKCE. After authorization, tokens are stored in `~/.baseflare/credentials.json` on your machine — not in the project directory.
+
+    ```bash
+    npx baseflare login
+    # → Opens browser → Cloudflare OAuth consent → authorize
+    # → ✓ Logged in as nick@example.com
+    # → Tokens saved to ~/.baseflare/credentials.json
+    ```
+  </Step>
+</Steps>
+
+Named profiles let you manage multiple Cloudflare accounts on the same machine — for example, a personal account and a client account:
+
+```bash
+# Store a named profile
+npx baseflare login --profile client-x
+# → Tokens stored under "client-x" in ~/.baseflare/credentials.json
+
+# Profile storage format
+# ~/.baseflare/credentials.json (global — never committed)
+{
+  "default":  { "accessToken": "...", "refreshToken": "...", "email": "nick@example.com" },
+  "client-x": { "accessToken": "...", "refreshToken": "...", "email": "admin@clientx.com" }
+}
+```
+
+When multiple profiles exist, `npx baseflare dev` prompts you to select which profile and account to use. After the first run, the selection is written to `.env.local` (`BASEFLARE_PROFILE`) and subsequent runs skip the prompt.
+
+---
+
+## Environment Isolation
+
+<Note>
+  Inserting a document in staging does **not** affect production. Each environment has its own dedicated D1 database with its own data, its own R2 bucket, its own Durable Object instances, and its own Worker script. There is no shared state of any kind between environments.
+</Note>
+
+This isolation model means you can freely:
+
+- Run destructive test data in staging without touching production
+- Deploy experimental schema changes to staging before rolling to production
+- Restore a staging database from a snapshot without affecting production
+- Grant team members access to staging while restricting production access
+
+Each environment's D1 database has its own Time Travel history, so point-in-time recovery is independent per environment.
+
+---
+
+## Planned CLI Commands
+
+The following `baseflare` CLI commands cover environment and secrets management. They are part of the Phase 4 CLI implementation and are in active development.
+
+```bash
+# List all environments for the current project
+baseflare env list
+
+# Deploy to an environment (creates it on first deploy)
+baseflare deploy --env <name>
+
+# Preview schema changes without deploying
+baseflare deploy --env <name> --dry-run
+
+# Delete all Cloudflare resources for an environment
+baseflare env destroy --env <name>
+
+# Manage Worker Secrets per environment
+baseflare secrets set KEY value --env <name>
+baseflare secrets list --env <name>
+baseflare secrets rm KEY --env <name>
+
+# Backup and restore via D1 Time Travel
+baseflare backup list --env <name>
+baseflare backup restore --env <name>
+```
+
+<Note>
+  The CLI is in active development. Some commands listed above are scaffolded and planned as part of Phase 4. See [IMPLEMENTATION_PLAN.md](https://github.com/nickruigrok/baseflare/blob/main/IMPLEMENTATION_PLAN.md) for the full roadmap and delivery timeline.
+</Note>

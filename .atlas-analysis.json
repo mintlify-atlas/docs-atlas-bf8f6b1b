@@ -1,0 +1,131 @@
+{
+  "projectType": "framework",
+  "projectName": "Baseflare",
+  "projectDescription": "An open-source, Cloudflare-native backend framework with a Convex-style developer experience — define your schema and TypeScript functions, deploy to Cloudflare Workers with D1, Durable Objects, R2, and Vectorize, all on your own account.",
+  "theme": "luma",
+  "primaryColor": "#F97316",
+  "lightColor": "#FED7AA",
+  "darkColor": "#C2410C",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "concepts"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "guides/schema",
+              "guides/validators",
+              "guides/queries",
+              "guides/mutations",
+              "guides/actions",
+              "guides/permissions"
+            ]
+          },
+          {
+            "group": "HTTP & Routing",
+            "pages": [
+              "guides/http-actions",
+              "guides/http-router"
+            ]
+          },
+          {
+            "group": "Configuration & Deployment",
+            "pages": [
+              "guides/configuration",
+              "guides/deployment",
+              "guides/environments"
+            ]
+          },
+          {
+            "group": "Planned Features",
+            "pages": [
+              "guides/realtime",
+              "guides/auth",
+              "guides/storage",
+              "guides/scheduler"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "baseflare/values",
+            "pages": [
+              "api/validators",
+              "api/id-utilities",
+              "api/errors",
+              "api/pagination"
+            ]
+          },
+          {
+            "group": "baseflare/server",
+            "pages": [
+              "api/define-schema",
+              "api/define-table",
+              "api/server-functions",
+              "api/define-rules",
+              "api/http-router",
+              "api/query-builder",
+              "api/create-worker",
+              "api/define-config"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Convex-compatible query/mutation/action function model",
+    "Type-safe validators with v.string(), v.number(), v.object(), v.array(), and more",
+    "Schema definition with defineSchema() and defineTable() — document model on D1/SQLite",
+    "Deny-by-default permission system via defineRules()",
+    "HTTP routing with httpRouter() and httpAction()",
+    "UUIDv7 document IDs with _createdAt derived from ID timestamp",
+    "Query builder with json_extract() SQL, filters, ordering, pagination",
+    "Cloudflare-native: Workers + D1 + R2 + Durable Objects + Vectorize",
+    "No vendor lock-in — deploys to your own Cloudflare account",
+    "MIT licensed, open source"
+  ],
+  "publicApiSurface": [
+    "v (validators: string, number, boolean, bytes, null, id, array, object, record, union, literal, enum, vector, any, optional)",
+    "defineSchema(tables)",
+    "defineTable(fields).index(name, fields, options)",
+    "query({ args, returns, handler })",
+    "mutation({ args, returns, handler })",
+    "action({ args, returns, handler })",
+    "internalQuery({ args, returns, handler })",
+    "internalMutation({ args, returns, handler })",
+    "internalAction({ args, returns, handler })",
+    "defineRules(rules)",
+    "httpAction(handler)",
+    "httpRouter() -> HttpRouter",
+    "HttpRouter.route(config)",
+    "HttpRouter.routeWithPrefix(config)",
+    "createWorker(manifest)",
+    "defineConfig(config)",
+    "generateId()",
+    "getCreatedAtFromId(id)",
+    "paginationOptsValidator",
+    "BaseflareError",
+    "ValidationError",
+    "SchemaError",
+    "serialize(doc)",
+    "deserialize(row)",
+    "validateInsertData(table, data)",
+    "validatePatchData(table, current, patch)",
+    "validateReplaceData(table, data)",
+    "diffSchemas(current, target)",
+    "createQueryBuilder(table)"
+  ]
+}

@@ -1,0 +1,146 @@
+---
+title: "Run Side Effects with Baseflare Actions"
+sidebarTitle: "Actions"
+description: "Actions handle side effects — external API calls, emails, payments, webhook processing — outside of database transactions. Use ctx.runQuery() and ctx.runMutation() for database access."
+---
+
+Actions are the right place for work that involves the outside world: calling external APIs, sending email, processing payments, handling webhooks, or orchestrating a sequence of database changes interleaved with network I/O. Unlike mutations, actions run outside of a database transaction and are **not** automatically retried by the runtime on conflict. This makes them safe for non-idempotent operations. Actions do not have direct access to `ctx.db` — all database reads and writes go through `ctx.runQuery()` and `ctx.runMutation()`.
+
+## Defining an Action
+
+Use `action()` from `baseflare/server`. The signature mirrors `query()` and `mutation()` — provide `args`, an optional `returns` validator, and a `handler` that receives an `ActionCtx`:
+
+```typescript
+import { action } from 'baseflare/server'
+import { v } from 'baseflare/values'
+
+import { createTodo } from './mutations'
+
+export const importTodo = action({
+  args: {
+    ownerId: v.string(),
+    sourceUrl: v.string(),
+  },
+  returns: v.string(),
+  async handler(ctx, args) {
+    const response = await fetch(args.sourceUrl)
+    const text = await response.text()
+
+    return await ctx.runMutation(createTodo, {
+      ownerId: args.ownerId,
+      text,
+    })
+  },
+})
+```
+
+The `handler` can use `await` freely, perform multiple network calls, and call `ctx.runMutation()` to write results back to the database.
+
+## `ActionCtx` Methods
+
+Inside an action handler, `ctx` provides the following:
+
+| Method / Property | Description |
+|---|---|
+| `ctx.runQuery(ref, args)` | Run a query and return its typed result. Executes in its own read context. |
+| `ctx.runMutation(ref, args)` | Run a mutation in its own transaction. Each call is an independent atomic operation. |
+| `ctx.runAction(ref, args)` | Call another action. Useful for composing action logic. |
+| `ctx.auth` | Authentication context. Same `Auth` interface as queries and mutations. |
+| `ctx.scheduler` | Schedule future function execution. *(Planned)* |
+| `ctx.storage` | File storage access with upload, download, and delete. *(Planned)* |
+
+Both `ctx.runQuery` and `ctx.runMutation` accept a function reference — the exported result of a `query()`, `mutation()`, or their `internal*` counterparts — and return a typed `Promise`.
+
+<Warning>
+  Actions do **not** have `ctx.db`. Attempting to access `ctx.db` inside an action is a TypeScript compile-time error. All database access must go through `ctx.runQuery()` and `ctx.runMutation()`.
+</Warning>
+
+## Atomic Multi-Write Workflows
+
+Each `ctx.runMutation()` call creates a separate, independent transaction. There is no shared transaction across multiple `runMutation` calls within one action. If you need multiple writes to succeed or fail together atomically, put all of the write logic inside a single mutation and call that mutation once from the action:
+
+```typescript
+// ✅ Correct — one atomic transaction
+await ctx.runMutation(createUserAndProfile, { name, email })
+
+// ⚠️ Not atomic — two separate transactions
+await ctx.runMutation(createUser, { name, email })
+await ctx.runMutation(createProfile, { userId, bio })
+```
+
+If the second call fails in the non-atomic version, the first write has already been committed.
+
+## Use Cases
+
+<Accordion title="Calling external APIs (payment processing, email sending)">
+  Actions are the correct place for any call to a third-party API. Because actions are not retried automatically, a charge or an email will not be sent twice if something else fails afterward.
+
+  ```typescript
+  export const chargeCustomer = action({
+    args: { userId: v.id('users'), amountCents: v.number().integer().min(1) },
+    async handler(ctx, args) {
+      const user = await ctx.runQuery(getUser, { id: args.userId })
+      const result = await stripe.charges.create({
+        amount: args.amountCents,
+        currency: 'usd',
+        customer: user.stripeCustomerId,
+      })
+      await ctx.runMutation(recordCharge, { userId: args.userId, chargeId: result.id })
+    },
+  })
+  ```
+</Accordion>
+
+<Accordion title="Processing webhook payloads">
+  Webhook handlers typically need to verify a signature, parse a payload, and write the result to the database. Actions support all of this naturally.
+
+  ```typescript
+  export const handleStripeWebhook = action({
+    args: { rawBody: v.string(), signature: v.string() },
+    async handler(ctx, args) {
+      const event = stripe.webhooks.constructEvent(args.rawBody, args.signature, secret)
+      await ctx.runMutation(processStripeEvent, { event })
+    },
+  })
+  ```
+</Accordion>
+
+<Accordion title="Fetching remote data and storing results">
+  Fetch data from a remote source, transform it, and persist the results via a mutation — all in one action.
+
+  ```typescript
+  export const syncFeed = action({
+    args: { feedUrl: v.string() },
+    async handler(ctx, args) {
+      const response = await fetch(args.feedUrl)
+      const items = await response.json()
+      for (const item of items) {
+        await ctx.runMutation(upsertFeedItem, { item })
+      }
+    },
+  })
+  ```
+</Accordion>
+
+<Accordion title="Orchestrating multiple mutations in sequence">
+  When a workflow requires interleaving reads, external calls, and writes, an action gives you the flexibility to sequence them step by step while keeping each write operation atomic within its own mutation transaction.
+</Accordion>
+
+## Internal Actions
+
+Use `internalAction` from `baseflare/server` to define actions that are callable only from the server — not from the public client API:
+
+```typescript
+import { internalAction } from 'baseflare/server'
+import { v } from 'baseflare/values'
+
+export const sendWelcomeEmail = internalAction({
+  args: { userId: v.id('users') },
+  async handler(ctx, args) {
+    const user = await ctx.runQuery(getUser, { id: args.userId })
+    // send email...
+  },
+})
+```
+
+Internal actions are suitable for background jobs, scheduled work, and operations triggered by other server functions rather than by direct client requests.

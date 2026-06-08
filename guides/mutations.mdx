@@ -1,0 +1,136 @@
+---
+title: "Write Data Atomically with Baseflare Mutations"
+sidebarTitle: "Mutations"
+description: "Mutations are the atomic write primitive in Baseflare. Use ctx.db.insert, patch, replace, and delete to modify documents with full schema validation and permission enforcement."
+---
+
+Mutations are atomic write operations. They run inside a `MutationCtx` that provides both `ctx.db` (a `DatabaseWriter`, which also implements `DatabaseReader`) and `ctx.auth` for the caller's identity. The Baseflare runtime tracks every read and write that occurs during a mutation, detects conflicts with concurrent writes, and retries the mutation handler when it is safe to do so. Because handlers may be retried, they must be deterministic and free of side effects — network calls, emails, and payment charges belong in `action()`.
+
+## Defining a Mutation
+
+Use `mutation()` from `baseflare/server`. Supply `args`, an optional `returns` validator, and a `handler`:
+
+```typescript
+import { mutation } from 'baseflare/server'
+import { v } from 'baseflare/values'
+
+export const createTodo = mutation({
+  args: {
+    ownerId: v.string(),
+    text: v.string().min(1).max(280),
+  },
+  returns: v.string(),
+  async handler(ctx, args) {
+    return await ctx.db.insert('todos', {
+      ownerId: args.ownerId,
+      text: args.text,
+      completed: false,
+      tags: [],
+    })
+  },
+})
+
+export const completeTodo = mutation({
+  args: {
+    id: v.id('todos'),
+  },
+  async handler(ctx, args) {
+    await ctx.db.patch('todos', args.id, {
+      completed: true,
+    })
+  },
+})
+```
+
+`createTodo` returns the new document's `_id` string. `completeTodo` omits `returns`, so the return value is passed through as `unknown` without validation.
+
+## Write Methods
+
+All write methods are available on `ctx.db` inside a mutation handler.
+
+### `ctx.db.insert(table, doc)`
+
+Inserts a new document into `table`. The document is validated against the table's schema before writing. Returns a `Promise<string>` resolving to the new document's `_id`.
+
+```typescript
+const id = await ctx.db.insert('todos', {
+  ownerId: args.ownerId,
+  text: args.text,
+  completed: false,
+  tags: [],
+})
+```
+
+### `ctx.db.patch(table, id, partial)`
+
+Performs a shallow merge of `partial` into the existing document. Only the fields present in `partial` are changed — all other fields are left untouched. To remove a field, set it to `undefined` in the partial:
+
+```typescript
+// Update one field
+await ctx.db.patch('todos', args.id, { completed: true })
+
+// Remove a field
+await ctx.db.patch('todos', args.id, { tags: undefined })
+```
+
+### `ctx.db.replace(table, id, doc)`
+
+Fully replaces the document. The new value must pass schema validation. Fields present in the old document but absent from `doc` are removed.
+
+```typescript
+await ctx.db.replace('todos', args.id, {
+  ownerId: args.ownerId,
+  text: 'Rewritten text',
+  completed: false,
+  tags: [],
+})
+```
+
+### `ctx.db.delete(table, id)`
+
+Deletes the document with the given `_id`. Returns `Promise<void>`.
+
+```typescript
+await ctx.db.delete('todos', args.id)
+```
+
+All read methods from `DatabaseReader` — `ctx.db.get()` and `ctx.db.query()` — are also available inside mutations. Reads performed during a mutation are tracked as part of the conflict detection.
+
+## Return Value Validation
+
+When `returns` is provided, Baseflare validates the handler's return value before committing writes. If the return value fails validation, **the pending writes are not committed** and an error is returned to the caller.
+
+```typescript
+export const createTodo = mutation({
+  args: { text: v.string().min(1) },
+  returns: v.string(),  // must return a string or writes are rolled back
+  async handler(ctx, args) {
+    return await ctx.db.insert('todos', { text: args.text })
+  },
+})
+```
+
+<Warning>
+  Mutation handlers must be **deterministic and retry-safe**. The runtime may execute the handler more than once when a conflict is detected. Any side effect that should not be repeated — HTTP calls, sending email, charging a payment — must be moved to an `action()`. Actions are not automatically retried.
+</Warning>
+
+## Internal Mutations
+
+Use `internalMutation` from `baseflare/server` for server-only mutations that should not be callable from the client:
+
+```typescript
+import { internalMutation } from 'baseflare/server'
+
+export const markOverdue = internalMutation({
+  args: { id: v.id('todos') },
+  async handler(ctx, args) {
+    await ctx.db.patch('todos', args.id, { overdue: true })
+  },
+})
+```
+
+Internal mutations are callable from actions, other mutations, and scheduled functions, but are not exposed in the public API.
+
+## Calling from Actions
+
+When an action calls `ctx.runMutation()`, each call creates its own independent mutation transaction. If you need to write to multiple tables or make multiple writes atomically, put all of that logic inside a single mutation and call it once from the action. Splitting atomic work across multiple `ctx.runMutation()` calls does not provide cross-call atomicity.

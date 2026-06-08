@@ -1,0 +1,144 @@
+---
+title: "Route Custom HTTP Endpoints with HttpRouter"
+sidebarTitle: "HTTP Router"
+description: "httpRouter() creates an HttpRouter that maps HTTP method and path combinations to httpAction handlers, supporting both exact path matching and prefix matching."
+---
+
+`HttpRouter` manages the routing of custom HTTP requests to `httpAction` handlers. When a request arrives at your Worker, the router matches it by HTTP method and path — first trying exact matches, then falling back to prefix matches ordered by specificity. When multiple prefix routes match, the longest prefix wins. This gives you a predictable, conflict-free routing model without any ambiguity about which handler runs.
+
+## Creating a Router
+
+Use the `httpRouter()` factory function exported from `baseflare/server` to create a new `HttpRouter` instance. Register routes with `router.route()` or `router.routeWithPrefix()`, then export the router as the default export of your HTTP module.
+
+```typescript
+import { httpRouter, httpAction } from 'baseflare/server'
+
+const http = httpRouter()
+
+http.route({
+  path: '/webhooks/stripe',
+  method: 'POST',
+  handler: stripeWebhook,
+})
+
+export default http
+```
+
+The exported router is passed to `createWorker` via the `http` key in your Worker manifest, which wires it into the Worker's request dispatch loop.
+
+## `router.route(config)`
+
+`router.route()` registers an exact path match. The request must match both the HTTP method and the full path for the handler to fire.
+
+The `HttpRouteConfig` object accepts the following properties:
+
+| Property  | Type         | Description |
+|-----------|--------------|-------------|
+| `path`    | `string`     | The exact path to match. Must start with `/`. |
+| `method`  | `string`     | The HTTP method to match (e.g. `'POST'`, `'GET'`). Case-insensitive — normalized to uppercase internally. |
+| `handler` | `HttpAction` | An `HttpAction` created with `httpAction()`. |
+
+Registering the same method and path combination twice throws an error at setup time rather than silently overwriting the first registration.
+
+```typescript
+http.route({ path: '/webhooks/stripe',  method: 'POST', handler: stripeWebhook })
+http.route({ path: '/webhooks/github',  method: 'POST', handler: githubWebhook })
+http.route({ path: '/health',           method: 'GET',  handler: healthCheck })
+```
+
+## `router.routeWithPrefix(config)`
+
+`router.routeWithPrefix()` registers a prefix match. Any request whose path starts with `pathPrefix` and matches the given method will be routed to the handler. This is useful for routing whole subtrees — for example, mounting a versioned API namespace or delegating a range of paths to a single handler.
+
+```typescript
+http.routeWithPrefix({
+  pathPrefix: '/api/v1/',
+  method: 'GET',
+  handler: apiV1Handler,
+})
+// matches: GET /api/v1/users, GET /api/v1/posts, GET /api/v1/settings/profile, etc.
+```
+
+The `HttpPrefixRouteConfig` object accepts the following properties:
+
+| Property      | Type         | Description |
+|---------------|--------------|-------------|
+| `pathPrefix`  | `string`     | The path prefix to match. Must start with `/`. |
+| `method`      | `string`     | The HTTP method to match. Case-insensitive. |
+| `handler`     | `HttpAction` | An `HttpAction` created with `httpAction()`. |
+
+When multiple prefix routes match an incoming request, the router selects the one with the longest `pathPrefix`. This means more-specific prefixes always win over broader ones, giving you predictable layering without conflicts.
+
+Registering the same method and prefix combination twice throws an error.
+
+## `router.lookup(method, path)`
+
+`router.lookup()` is an internal method used by `createWorker` to resolve a handler for each incoming request. It normalizes the method to uppercase, checks exact routes first, then scans prefix routes sorted by descending prefix length.
+
+It returns the raw `HttpActionHandler` function if a match is found, or `null` if no registered route matches the request. You do not call this method in application code — it is part of the Worker dispatch plumbing.
+
+## Full Example
+
+Here is a complete router setup with multiple routes — two exact-match webhook handlers and a prefix-match handler for an API namespace:
+
+```typescript
+import { httpRouter, httpAction } from 'baseflare/server'
+
+const stripeWebhook = httpAction(async (ctx, request) => {
+  const payload = await request.json()
+  await ctx.runMutation(handleStripeEvent, { payload })
+  return new Response('ok')
+})
+
+const githubWebhook = httpAction(async (ctx, request) => {
+  const event = request.headers.get('x-github-event')
+  const body = await request.json()
+  await ctx.runAction(processGithubEvent, { event, body })
+  return new Response('ok')
+})
+
+const http = httpRouter()
+
+http.route({ path: '/webhooks/stripe', method: 'POST', handler: stripeWebhook })
+http.route({ path: '/webhooks/github', method: 'POST', handler: githubWebhook })
+
+export default http
+```
+
+## Integrating with `createWorker`
+
+Pass the router to `createWorker` via the `http` key in your Worker manifest. The `schema`, `rules`, and `functions` are also part of this manifest. `createWorker` wires everything together into a single Cloudflare Worker export.
+
+```typescript
+import { createWorker } from 'baseflare/server'
+import { schema } from './schema'
+import { rules } from './rules'
+import * as functions from './functions'
+import http from './http'
+
+export default createWorker({ schema, rules, functions, http })
+```
+
+The `http` key is optional. If omitted, all custom HTTP paths return a 404. RPC routes (`/api/query/*`, `/api/mutation/*`, `/api/action/*`) are always handled regardless of whether an `HttpRouter` is provided.
+
+## RPC Routes vs HTTP Routes
+
+<Info>
+  Baseflare automatically generates RPC routes for every query, mutation, and
+  action you define. These live under `/api/query/*`, `/api/mutation/*`, and
+  `/api/action/*` and are handled before custom HTTP routes are consulted.
+
+  Custom `HttpRouter` routes are checked after RPC dispatch. Because the two
+  systems operate on different path prefixes, they never conflict — you can
+  safely register routes at any path that doesn't start with `/api/query/`,
+  `/api/mutation/`, or `/api/action/`.
+</Info>
+
+## Method Case
+
+<Note>
+  Method names passed to `router.route()` and `router.routeWithPrefix()` are
+  case-insensitive. The strings `'post'`, `'POST'`, and `'Post'` are all
+  normalized to `'POST'` internally before registration and lookup. You can use
+  whichever casing you prefer — the router will match correctly regardless.
+</Note>

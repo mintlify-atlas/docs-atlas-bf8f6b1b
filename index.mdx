@@ -1,20 +1,65 @@
 ---
-title: "Introduction"
-description: "Welcome to your project"
+title: "Baseflare: Cloudflare-Native Backend Framework"
+sidebarTitle: "Home"
+description: "Baseflare gives you a Convex-style backend on your own Cloudflare account — typed schema, server functions, permissions, and a D1 document database. MIT licensed, no vendor lock-in."
 ---
 
-Write a short description of your product here. What it does, who it's for, and what they can accomplish with it.
+Baseflare is an open-source backend framework built for Cloudflare's developer platform. Define your data model and server functions in TypeScript, deploy to Cloudflare Workers with D1 as the database, and consume a typed API from your frontend — without assembling your own backend stack.
 
-<Tip>
-  Ready to make this your own? Start by editing this page. Update your `docs.json` file to customize your site. Then fill out the [Quickstart](/quickstart) page.
-</Tip>
+<CardGroup cols={2}>
+  <Card title="Introduction" icon="book-open" href="/introduction">
+    Understand what Baseflare is, how it compares to alternatives, and when to use it.
+  </Card>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Install Baseflare, define a schema, write your first query and mutation, and call them from curl.
+  </Card>
+  <Card title="Core Concepts" icon="lightbulb" href="/concepts">
+    Learn the document model, function types, and permission system that underpin Baseflare.
+  </Card>
+  <Card title="API Reference" icon="code" href="/api/validators">
+    Full reference for every exported function, type, and validator in `baseflare/values` and `baseflare/server`.
+  </Card>
+</CardGroup>
 
-<Card title="Quickstart" icon="rocket" href="/quickstart">
-  This card links to the quickstart page in your project.
-</Card>
-<Card title="Components" icon="puzzle-piece" href="https://mintlify.com/docs/components">
-  Add cards, callouts, steps, tabs, and more to design and structure your pages.
-</Card>
-<Card title="Settings" icon="gear" href="https://mintlify.com/docs/organize/settings">
-  Set your site name, branding, and navigation in the `docs.json` file.
-</Card>
+## Why Baseflare?
+
+Baseflare delivers the developer experience of Convex — typed queries, mutations, and actions with a document database — while running entirely on infrastructure you own. There is no managed control plane, no per-seat pricing, and no single-region limitation.
+
+<CardGroup cols={3}>
+  <Card title="Your Cloudflare Account" icon="cloud">
+    Workers, D1, R2, Durable Objects, and Vectorize all deploy to your account. You own the data and the billing relationship.
+  </Card>
+  <Card title="TypeScript-First" icon="brackets-curly">
+    Validators, schema definitions, and function signatures are all TypeScript. The runtime enforces them at every write and return boundary.
+  </Card>
+  <Card title="Deny-by-Default Permissions" icon="lock">
+    `defineRules()` gates every read, insert, update, and delete. No access is granted unless you explicitly allow it.
+  </Card>
+</CardGroup>
+
+## Explore the Framework
+
+<CardGroup cols={2}>
+  <Card title="Schema & Data Model" icon="database" href="/guides/schema">
+    Define tables and indexes with `defineSchema()` and `defineTable()`. Understand how the document model works on top of D1/SQLite.
+  </Card>
+  <Card title="Validators" icon="shield-check" href="/guides/validators">
+    Use `v.string()`, `v.number()`, `v.object()`, `v.array()`, and more to validate arguments and return values.
+  </Card>
+  <Card title="Queries" icon="magnifying-glass" href="/guides/queries">
+    Read documents with `query()`. Use the fluent query builder to filter, order, paginate, and count results.
+  </Card>
+  <Card title="Mutations" icon="pen-to-square" href="/guides/mutations">
+    Write documents atomically with `mutation()`. Insert, patch, replace, and delete with full schema validation.
+  </Card>
+  <Card title="Actions" icon="bolt" href="/guides/actions">
+    Run side effects — external API calls, emails, payments — with `action()`. Compose queries and mutations inside actions.
+  </Card>
+  <Card title="Permissions" icon="shield" href="/guides/permissions">
+    Gate every database operation with `defineRules()`. Rules receive the context and document so you can enforce ownership and roles.
+  </Card>
+</CardGroup>
+
+<Note>
+  Baseflare is early-stage alpha software. The core package — validators, schema, server functions, permissions, the query builder, and the D1 runtime foundation — is implemented. The CLI deploy workflow, generated client SDK, React hooks, auth, real-time subscriptions, scheduler, and storage are in active development.
+</Note>

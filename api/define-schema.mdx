@@ -1,0 +1,116 @@
+---
+title: "defineSchema() — Declare Your Baseflare Data Model"
+sidebarTitle: "defineSchema"
+description: "defineSchema(tables) compiles a record of defineTable() builders into a validated Schema object. Generates CREATE TABLE and CREATE INDEX SQL via toCreateStatements()."
+---
+
+`defineSchema` is the top-level function that assembles your entire data model. It accepts a plain object mapping table names to `TableBuilder` instances created by `defineTable()`, validates each table definition, normalizes partition index assignments across all tables, and returns a fully typed `Schema` object. The returned schema is the single source of truth consumed by `createWorker`, the CLI deploy command, and `diffSchemas`.
+
+## Signature
+
+```typescript
+function defineSchema<TTables extends SchemaTables>(
+  tables: TTables
+): Schema<NormalizedSchemaTables<TTables>>
+```
+
+## Parameters
+
+<ParamField path="tables" type="Record<string, TableBuilder>" required>
+  A plain object where each key is a table name and each value is a `TableBuilder`
+  returned by `defineTable()`. Table names must be valid identifiers (letters, digits,
+  underscores) and must not start with `_`.
+</ParamField>
+
+## Returns
+
+A `Schema` object with two members:
+
+<ResponseField name="tables" type="NormalizedSchemaTables<TTables>">
+  The normalized table definitions, keyed by table name. Each entry carries the
+  field validators and the final (normalized) index list with partition flags resolved.
+</ResponseField>
+
+<ResponseField name="toCreateStatements()" type="string[]">
+  Returns an array of SQL DDL strings — one `CREATE TABLE` statement per table
+  followed by one `CREATE INDEX` statement per index across all tables. These are
+  the exact statements the CLI runs during deployment.
+</ResponseField>
+
+## Validation Rules
+
+`defineSchema` enforces the following at call time; any violation throws a `SchemaError`:
+
+- At least one table must be defined.
+- Every table name must match `/^[A-Za-z][A-Za-z0-9_]*$/` and must **not** start with `_` (those names are reserved for internal Baseflare system tables).
+- At most one partition index is allowed per table.
+- Tables with multiple indexes must either mark exactly one index `{ partition: true }`, or opt every index out with `{ partition: false }`. A mix of implicit and explicit partition settings is rejected.
+- A table with a single index has its partition flag defaulted to `true` unless explicitly set to `false`.
+- Partition indexes may only reference scalar field types (`boolean`, `enum`, `id`, `literal`, `number`, `string`).
+
+## Example
+
+```typescript
+import { defineSchema, defineTable } from 'baseflare/server'
+import { v } from 'baseflare/values'
+
+export const schema = defineSchema({
+  todos: defineTable({
+    ownerId: v.string(),
+    text: v.string().min(1).max(280),
+    completed: v.boolean().default(false),
+  }).index('by_owner', ['ownerId']),
+
+  users: defineTable({
+    email: v.string(),
+    name: v.string(),
+  }),
+})
+
+// Generate SQL DDL
+const sql = schema.toCreateStatements()
+// [
+//   'CREATE TABLE todos (_id TEXT PRIMARY KEY, _data TEXT NOT NULL, _rev INTEGER NOT NULL DEFAULT 0 CHECK(_rev >= 0))',
+//   'CREATE TABLE users (_id TEXT PRIMARY KEY, _data TEXT NOT NULL, _rev INTEGER NOT NULL DEFAULT 0 CHECK(_rev >= 0))',
+//   'CREATE INDEX todos_by_owner ON todos (json_extract(_data, \'$.ownerId\'))',
+// ]
+```
+
+## `diffSchemas(current, target)`
+
+`diffSchemas` is also exported from `baseflare/server` and is used by the Baseflare CLI to compute the delta between the schema currently deployed in a D1 database and the schema defined in your source code.
+
+```typescript
+function diffSchemas(current: Schema, target: Schema): SchemaDiff
+```
+
+It compares `current` against `target` and returns a `SchemaDiff` object:
+
+<ResponseField name="addedTables" type="SchemaTables">
+  Tables present in `target` but not in `current` — will be created on deploy.
+</ResponseField>
+
+<ResponseField name="orphanedTables" type="string[]">
+  Tables present in `current` but absent from `target`. These are **reported only** — Baseflare never automatically drops tables to prevent data loss. Use the dashboard to remove them explicitly.
+</ResponseField>
+
+<ResponseField name="addedIndexes" type="DiffedIndex[]">
+  Indexes present in `target` but missing from `current`, or indexes whose field list has changed (old index is removed, new index is created).
+</ResponseField>
+
+<ResponseField name="removedIndexes" type="DiffedIndex[]">
+  Indexes present in `current` but absent from `target`.
+</ResponseField>
+
+<ResponseField name="hasChanges" type="boolean">
+  `true` if any of the above arrays are non-empty.
+</ResponseField>
+
+<ResponseField name="toStatements()" type="string[]">
+  Returns the ordered SQL statements that apply the diff: `DROP INDEX IF EXISTS` for removed indexes, `CREATE TABLE` for added tables, `CREATE INDEX` for added indexes.
+</ResponseField>
+
+<Note>
+  `diffSchemas` is primarily an internal tool invoked by the CLI. You won't need to
+  call it directly in application code.
+</Note>

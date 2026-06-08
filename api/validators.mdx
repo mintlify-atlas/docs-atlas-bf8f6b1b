@@ -1,0 +1,427 @@
+---
+title: "v — Baseflare Validator Namespace Reference"
+sidebarTitle: "v (validators)"
+description: "Complete reference for the v namespace from baseflare/values. Covers all primitive, composite, and special validators with their TypeScript types, modifier methods, and usage examples."
+---
+
+The `v` namespace is exported from `baseflare/values` and is the primary validator toolkit used throughout Baseflare. You use it in `defineTable()` to declare field types, in `query()`, `mutation()`, and `action()` argument shapes to validate incoming data, and in return value contracts to enforce outgoing types. Every validator enforces its constraints at runtime — calling `.validate()` either returns a typed output or throws a `ValidationError` — and simultaneously carries full TypeScript type information so your handlers receive correctly-typed arguments without any extra casting.
+
+## Import
+
+```typescript
+import { v } from 'baseflare/values'
+```
+
+---
+
+## Primitive Validators
+
+### `v.string()`
+
+Validates that a value is a JavaScript `string`.
+
+| | Type |
+|---|---|
+| **Input** | `string` |
+| **Output** | `string` |
+
+**Modifiers:** `.min(n)`, `.max(n)`, `.searchable()`
+
+```typescript
+v.string()               // any string
+v.string().min(1)        // non-empty string
+v.string().max(100)      // up to 100 characters
+v.string().searchable()  // mark for FTS5 full-text search index
+```
+
+---
+
+### `v.number()`
+
+Validates that a value is a finite, non-`NaN` JavaScript `number`. Rejects `Infinity`, `-Infinity`, and `NaN`.
+
+| | Type |
+|---|---|
+| **Input** | `number` |
+| **Output** | `number` |
+
+**Modifiers:** `.min(n)`, `.max(n)`, `.integer()`
+
+```typescript
+v.number()                         // any finite number
+v.number().min(0)                  // non-negative
+v.number().min(0).max(100)         // range 0–100
+v.number().integer()               // safe integer only
+v.number().min(0).max(100).integer() // integer in range
+```
+
+---
+
+### `v.boolean()`
+
+Validates that a value is a JavaScript `boolean` (`true` or `false`).
+
+| | Type |
+|---|---|
+| **Input** | `boolean` |
+| **Output** | `boolean` |
+
+```typescript
+v.boolean()               // true or false
+v.boolean().default(false) // defaults to false if field is absent
+```
+
+---
+
+### `v.bytes()`
+
+Validates that a value is a `Uint8Array`. Suitable for binary blobs, hashes, or encrypted payloads.
+
+| | Type |
+|---|---|
+| **Input** | `Uint8Array` |
+| **Output** | `Uint8Array` |
+
+**Modifiers:** `.min(n)`, `.max(n)` (measured in bytes via `.byteLength`)
+
+```typescript
+v.bytes()          // any Uint8Array
+v.bytes().min(16)  // at least 16 bytes
+v.bytes().max(512) // at most 512 bytes
+```
+
+---
+
+### `v.null()`
+
+Validates the exact value `null`. Commonly used inside `v.union()` to create nullable fields.
+
+| | Type |
+|---|---|
+| **Input** | `null` |
+| **Output** | `null` |
+
+```typescript
+v.null()
+v.union(v.string(), v.null()) // string | null
+```
+
+---
+
+### `v.any()`
+
+Accepts any value without type-checking. The TypeScript output type is `unknown`, so you must narrow the type yourself before using the value.
+
+| | Type |
+|---|---|
+| **Input** | `unknown` |
+| **Output** | `unknown` |
+
+```typescript
+v.any() // pass-through — no runtime checks performed
+```
+
+<Note>
+  Prefer a specific validator over `v.any()` wherever possible. `v.any()` disables both runtime validation and TypeScript type narrowing for that field.
+</Note>
+
+---
+
+## ID Validator
+
+### `v.id(tableName)`
+
+Validates that a value is a valid UUIDv7 string **and** brands the TypeScript type with the given table name. The branded `Id<TTableName>` type prevents accidentally passing an ID from one table where an ID from a different table is expected.
+
+| | Type |
+|---|---|
+| **Input** | `Id<TTableName>` |
+| **Output** | `Id<TTableName>` |
+
+**Parameters:**
+
+<ParamField path="tableName" type="string" required>
+  The name of the table this ID belongs to. Used for the TypeScript brand only — not checked against the schema at runtime.
+</ParamField>
+
+```typescript
+v.id('todos')   // validates a UUIDv7 and types it as Id<'todos'>
+v.id('users')   // validates a UUIDv7 and types it as Id<'users'>
+
+// TypeScript prevents mixing IDs from different tables:
+const todoId: Id<'todos'> = args.todoId  // ✅
+const userId: Id<'users'> = args.todoId  // ❌ Type error
+```
+
+---
+
+## Composite Validators
+
+### `v.array(item)`
+
+Validates that a value is a JavaScript array where every element passes the given `item` validator. Each element is validated in order; the error path includes the array index (e.g., `value[2]`).
+
+| | Type |
+|---|---|
+| **Input** | `InputOf<TItem>[]` |
+| **Output** | `OutputOf<TItem>[]` |
+
+**Modifiers:** `.min(n)`, `.max(n)` (measured in array `.length`)
+
+<ParamField path="item" type="Validator" required>
+  The validator to apply to each element of the array.
+</ParamField>
+
+```typescript
+v.array(v.string())           // string[]
+v.array(v.number()).min(1)    // number[] with at least 1 element
+v.array(v.id('tags')).max(10) // at most 10 tag IDs
+v.array(v.object({
+  label: v.string(),
+  value: v.number(),
+}))
+```
+
+---
+
+### `v.object(shape)`
+
+Validates a plain JavaScript object whose keys exactly match `shape`. **Unknown keys are rejected** — any key present on the input that is not declared in `shape` throws a `ValidationError`. Each value is validated by its corresponding validator in `shape`.
+
+| | Type |
+|---|---|
+| **Input** | `ObjectInput<TShape>` (required keys required, optional keys optional) |
+| **Output** | `ObjectOutput<TShape>` |
+
+<ParamField path="shape" type="Record<string, Validator>" required>
+  An object mapping field names to validators.
+</ParamField>
+
+```typescript
+v.object({
+  title:     v.string().min(1).max(200),
+  priority:  v.enum(['low', 'medium', 'high']),
+  dueDate:   v.number().integer().optional(),
+  completed: v.boolean().default(false),
+})
+```
+
+---
+
+### `v.record(valueValidator)`
+
+Validates a plain JavaScript object treated as a `Record<string, T>` — any string keys are allowed, but each value must pass `valueValidator`. Unlike `v.object()`, no specific keys are required or checked.
+
+| | Type |
+|---|---|
+| **Input** | `Record<string, InputOf<TValue>>` |
+| **Output** | `Record<string, OutputOf<TValue>>` |
+
+<ParamField path="valueValidator" type="Validator" required>
+  The validator applied to every value in the record.
+</ParamField>
+
+```typescript
+v.record(v.number())           // Record<string, number>
+v.record(v.array(v.string()))  // Record<string, string[]>
+```
+
+---
+
+### `v.union(...members)`
+
+Validates that a value matches **at least one** of the given member validators. Members are tried in order; the first one that succeeds wins. If all members fail, a `ValidationError` is thrown listing all failure reasons.
+
+| | Type |
+|---|---|
+| **Input** | `InputOf<TMembers[number]>` |
+| **Output** | `OutputOf<TMembers[number]>` |
+
+Members are passed as rest arguments (spread), not as an array.
+
+```typescript
+v.union(v.string(), v.null())              // string | null
+v.union(v.number(), v.boolean())           // number | boolean
+v.union(
+  v.literal('pending'),
+  v.literal('active'),
+  v.literal('archived'),
+)                                          // 'pending' | 'active' | 'archived'
+```
+
+---
+
+### `v.literal(value)`
+
+Validates that the value is exactly equal (`===`) to the given literal. The TypeScript output type is the narrowed literal type.
+
+| | Type |
+|---|---|
+| **Input** | `TValue` (the literal itself) |
+| **Output** | `TValue` |
+
+<ParamField path="value" type="string | number | boolean | null" required>
+  The exact value to match. Must be a primitive.
+</ParamField>
+
+```typescript
+v.literal('active')   // only the string 'active'
+v.literal(42)         // only the number 42
+v.literal(true)       // only true
+v.literal(null)       // equivalent to v.null()
+```
+
+---
+
+### `v.enum(values)`
+
+Validates that a value is a `string` matching one of the entries in `values`. Prefer `v.enum()` over `v.union(v.literal(...), ...)` when all variants are strings — it produces a cleaner error message and stores the allowed values in the schema definition.
+
+| | Type |
+|---|---|
+| **Input** | `TValues[number]` |
+| **Output** | `TValues[number]` |
+
+<ParamField path="values" type="[string, ...string[]]" required>
+  A non-empty tuple of allowed string values.
+</ParamField>
+
+```typescript
+v.enum(['low', 'medium', 'high'])
+// input/output type: 'low' | 'medium' | 'high'
+
+v.enum(['draft', 'published', 'archived'])
+```
+
+---
+
+### `v.vector({ dimensions })`
+
+Validates a `number[]` of **exactly** `dimensions` elements where every element is a finite, non-`NaN` number. Used for storing embedding vectors (e.g., from OpenAI or Workers AI) in a Baseflare table.
+
+| | Type |
+|---|---|
+| **Input** | `number[]` |
+| **Output** | `number[]` |
+
+**Modifiers:** `.min(n)`, `.max(n)` (vector lengths are fixed by `dimensions`, so these are rarely needed)
+
+<ParamField path="options.dimensions" type="number" required>
+  The exact required length of the vector array.
+</ParamField>
+
+```typescript
+v.vector({ dimensions: 1536 })  // OpenAI text-embedding-3-small
+v.vector({ dimensions: 768 })   // Workers AI embedding
+```
+
+---
+
+## Optional Helper
+
+### `v.optional(validator)`
+
+Shorthand for `validator.optional()`. Makes the field optional — the input may be `undefined`, and the output type becomes `T | undefined`.
+
+```typescript
+v.optional(v.string())   // equivalent to v.string().optional()
+v.optional(v.number())   // number | undefined
+```
+
+---
+
+## Modifier Methods
+
+All validators expose these chainable modifier methods. Not every modifier is supported by every validator kind — unsupported combinations throw a `SchemaError` at definition time.
+
+<ParamField path=".optional()" type="method">
+  Makes the field optional in input. The output type becomes `T | undefined`. When the field is absent, `undefined` is returned without error.
+
+  ```typescript
+  v.string().optional()  // input: string | undefined → output: string | undefined
+  ```
+</ParamField>
+
+<ParamField path=".default(value)" type="method">
+  Provides a fallback value when the field is absent from input. Makes the field optional in input but guarantees the output is always `T` (never `undefined`).
+
+  ```typescript
+  v.boolean().default(false)    // input: boolean | undefined → output: boolean
+  v.array(v.string()).default([]) // array always present in output
+  v.number().default(0)
+  ```
+</ParamField>
+
+<ParamField path=".min(n)" type="method">
+  Validates a minimum. Supported kinds and what is measured:
+
+  | Kind | Measured |
+  |---|---|
+  | `string` | `.length` (character count) |
+  | `number` | numeric value |
+  | `array` | `.length` (element count) |
+  | `bytes` | `.byteLength` |
+  | `vector` | `.length` (element count) |
+</ParamField>
+
+<ParamField path=".max(n)" type="method">
+  Validates a maximum, following the same per-kind rules as `.min(n)`.
+</ParamField>
+
+<ParamField path=".searchable()" type="method">
+  Schema-level hint that marks a `string` field for inclusion in a SQLite FTS5 full-text search index. Has no effect at runtime validation — the hint is read by the schema differ when creating or migrating tables.
+
+  ```typescript
+  v.string().searchable()  // field included in FTS5 index
+  ```
+</ParamField>
+
+<ParamField path=".integer()" type="method">
+  Available on `v.number()` only. Validates that the number passes `Number.isSafeInteger()`. Combine with `.min()` and `.max()` to constrain integer ranges.
+
+  ```typescript
+  v.number().integer()               // any safe integer
+  v.number().integer().min(1)        // positive integer
+  v.number().integer().min(0).max(255) // byte value
+  ```
+</ParamField>
+
+**Combined example:**
+
+```typescript
+v.string().min(1).max(280)             // 1–280 character string
+v.number().min(0).max(100).integer()   // integer 0–100
+v.boolean().default(false)             // optional in input, always false if missing
+v.array(v.string()).default([])        // optional array, defaults to []
+v.string().optional()                  // may be undefined
+```
+
+---
+
+## `Validator<TInput, TOutput>` Interface
+
+Every value returned by the `v` namespace implements the `Validator` interface. The full generic signature is:
+
+```typescript
+interface Validator<
+  TInput,
+  TOutput,
+  TKind extends ValidatorKind = ValidatorKind,
+  TOptional extends boolean = false,
+  THasDefault extends boolean = false,
+>
+```
+
+<ResponseField name="validate(value, path?)" type="(value: unknown, path?: string) => TOutput">
+  Runs the validator against `value`. Returns `TOutput` on success, or throws a `ValidationError` on failure. The optional `path` argument is used in the error message to identify where in a nested structure the failure occurred (e.g., `"args.address.zip"`). Defaults to `"value"` when called directly.
+
+  ```typescript
+  v.string().min(1).validate('hello')    // → 'hello'
+  v.string().min(1).validate('')         // throws ValidationError: "Value must have length at least 1"
+  v.number().validate('oops')            // throws ValidationError: "Value must be a finite number"
+  ```
+</ResponseField>
+
+<ResponseField name="definition" type="ValidatorDefinition">
+  The schema definition object carrying the validator's kind, constraints (`min`, `max`, `integer`, `searchable`), and structural metadata (`shape`, `item`, `members`, etc.). This is read by Baseflare's schema differ to compute migrations and by the query engine to enforce schema constraints.
+</ResponseField>

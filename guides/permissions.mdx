@@ -1,0 +1,135 @@
+---
+title: "Secure Your Data with Baseflare Permissions"
+sidebarTitle: "Permissions"
+description: "Baseflare uses a deny-by-default permission model. Define read, insert, update, and delete rules per table using defineRules(). No access is granted unless you explicitly allow it."
+---
+
+Baseflare's permission system is deny-by-default. Every database operation — read, insert, update, and delete — is denied unless a matching rule function explicitly returns `true`. This means that a table with no entry in your `defineRules()` call rejects all operations silently, and an operation with a matching rule that returns `false` or `undefined` is also denied. There is no implicit "allow all" — every table you intend to access must have rules defined.
+
+## `defineRules(rules)`
+
+`defineRules` accepts an object mapping table names to a set of rule functions. Each rule function receives a context object with `ctx` (the function execution context, including `ctx.auth`) and properties specific to the operation being evaluated.
+
+```typescript
+import { defineRules } from 'baseflare/server'
+
+export const rules = defineRules({
+  todos: {
+    read: async ({ ctx, doc }) =>
+      doc.ownerId === (await ctx.auth.getUserIdentity()),
+    insert: async ({ ctx, value }) =>
+      value.ownerId === (await ctx.auth.getUserIdentity()),
+    update: async ({ ctx, existingDoc }) =>
+      existingDoc.ownerId === (await ctx.auth.getUserIdentity()),
+    delete: async ({ ctx, existingDoc }) =>
+      existingDoc.ownerId === (await ctx.auth.getUserIdentity()),
+  },
+})
+```
+
+Rule functions may be synchronous or `async`. A return value of `true` grants the operation. Any other return value — `false`, `undefined`, or a thrown error — denies it.
+
+## Rule Operations
+
+Each table entry can define up to four rule functions, one per operation. All four are optional — omitting a rule for an operation denies it entirely.
+
+### `read`
+
+Called once per document on query results. If the rule returns `false`, that document is **silently excluded** from the result set rather than returning an error. This applies to `.collect()`, `.first()`, `.unique()`, `.take()`, `.count()`, and `.paginate()`, as well as direct `ctx.db.get()` lookups.
+
+```typescript
+read: ({ ctx, doc }) => doc.ownerId === ctx.auth.getUserIdentity()
+// Arguments: { ctx, doc }
+// doc — the full document being evaluated
+```
+
+### `insert`
+
+Called before a document is written by `ctx.db.insert()`. Returning `false` rejects the insert and throws a permission error.
+
+```typescript
+insert: ({ ctx, value }) => value.ownerId === ctx.auth.getUserIdentity()
+// Arguments: { ctx, value }
+// value — the document about to be inserted
+```
+
+### `update`
+
+Called before `ctx.db.patch()` or `ctx.db.replace()` is applied. Returning `false` rejects the write.
+
+```typescript
+update: ({ ctx, existingDoc, value }) =>
+  existingDoc.ownerId === ctx.auth.getUserIdentity()
+// Arguments: { ctx, existingDoc, value }
+// existingDoc — the document as it currently exists in the database
+// value       — the partial (patch) or full (replace) document being written
+```
+
+### `delete`
+
+Called before `ctx.db.delete()` removes a document. Returning `false` rejects the deletion.
+
+```typescript
+delete: ({ ctx, existingDoc }) =>
+  existingDoc.ownerId === ctx.auth.getUserIdentity()
+// Arguments: { ctx, existingDoc }
+// existingDoc — the document about to be deleted
+```
+
+## `ctx.auth.getUserIdentity()`
+
+The `ctx.auth` object is available in every rule function via the `ctx` property. It exposes `getUserIdentity()`, which returns the identity extracted from the caller's `Authorization: Bearer <token>` header. The runtime populates this automatically — you do not need to parse the header manually.
+
+```typescript
+const identity = await ctx.auth.getUserIdentity()
+```
+
+`getUserIdentity()` may return `null` if no token is present or the token is invalid, so rules that require authentication should guard against a `null` identity:
+
+```typescript
+read: async ({ ctx, doc }) => {
+  const identity = await ctx.auth.getUserIdentity()
+  if (!identity) return false
+  return doc.ownerId === identity
+}
+```
+
+## Deny by Default
+
+<Warning>
+  A table with **no rules** in `defineRules()` denies **all operations**. This includes reads — even server-side internal queries respect the permission rules. Always define rules for every table you intend to access. An empty object `{}` passed to `defineRules` will deny all access to all tables.
+</Warning>
+
+## Allow All (Development)
+
+During local development or prototyping, you may want to bypass permissions entirely. Use rule functions that always return `true`:
+
+```typescript
+export const rules = defineRules({
+  todos: {
+    read: () => true,
+    insert: () => true,
+    update: () => true,
+    delete: () => true,
+  },
+})
+```
+
+<Warning>
+  Permissive rules that always return `true` should **never be used in production**. Any authenticated or unauthenticated caller will be able to read, write, and delete all documents in the table.
+</Warning>
+
+## Passing Rules to the Worker
+
+Rules are wired into the Worker runtime by passing them to `createWorker` alongside the schema and your function exports:
+
+```typescript
+import { createWorker } from 'baseflare/server'
+import { schema } from './schema'
+import { rules } from './rules'
+import * as functions from './functions'
+
+export default createWorker({ schema, rules, functions })
+```
+
+The runtime evaluates the appropriate rule function on every database operation, regardless of whether the operation originates from a public function called by the client or from an internal function called server-side.

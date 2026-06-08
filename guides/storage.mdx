@@ -1,0 +1,105 @@
+---
+title: "File Storage with R2 and ctx.storage"
+sidebarTitle: "Storage"
+description: "Baseflare plans to expose Cloudflare R2 file storage via ctx.storage in mutations and actions — generate upload URLs, store files server-side, and retrieve metadata."
+---
+
+File storage is a planned feature for Baseflare that will be delivered in Phase 7a of the implementation roadmap. When implemented, `ctx.storage` will be available in mutations and actions, providing a clean API over Cloudflare R2. R2 is used because it is natively integrated with Cloudflare Workers, has zero egress fees, and requires no extra credentials or service accounts — the bucket is provisioned automatically alongside your Worker on first deploy.
+
+<Note>
+  File storage via `ctx.storage` is a **planned feature** in active development and is not yet available in any released version of Baseflare. The API described on this page reflects the intended design from the Phase 7a implementation plan.
+</Note>
+
+## Client Upload Flow
+
+The recommended pattern for browser file uploads is a two-step flow. The client never sends files through your Worker — instead, it gets a signed URL and uploads directly to R2. This keeps your Worker fast and avoids hitting CPU or memory limits on large uploads.
+
+<Steps>
+  <Step title="Generate a signed upload URL">
+    Call a mutation that invokes `ctx.storage.generateUploadUrl()`. This returns a short-lived signed URL pointing directly at your R2 bucket. The signed URL is safe to hand to the client.
+
+    ```typescript
+    // Step 1: Get a signed upload URL (in a mutation)
+    export const generateUploadUrl = mutation({
+      args: {},
+      returns: v.string(),
+      async handler(ctx) {
+        return await ctx.storage.generateUploadUrl()
+      },
+    })
+    ```
+  </Step>
+  <Step title="Upload the file directly to R2">
+    The client receives the signed URL and POSTs the file directly to R2. On success, R2 returns a `storageId` — a stable identifier for the stored object that can be passed back to your backend.
+
+    ```typescript
+    // Client-side (browser)
+    const uploadUrl = await createTodo.generateUploadUrl({})
+
+    const result = await fetch(uploadUrl, {
+      method: 'POST',
+      body: fileInput.files[0],
+    })
+
+    const { storageId } = await result.json()
+    ```
+  </Step>
+  <Step title="Save the storageId to a document">
+    Call a second mutation with the `storageId` to persist the reference alongside your application data. The `storageId` is a plain string — store it in any document field.
+
+    ```typescript
+    // Step 3: Save the storageId to a document
+    export const saveAttachment = mutation({
+      args: {
+        todoId: v.id('todos'),
+        storageId: v.string(),
+      },
+      async handler(ctx, args) {
+        await ctx.db.patch('todos', args.todoId, { attachmentId: args.storageId })
+      },
+    })
+    ```
+  </Step>
+</Steps>
+
+## Server-Side Upload
+
+For server-side file handling — downloading a remote file, processing a webhook payload, or importing data — actions can upload directly to R2 using `ctx.storage.store()`. This method accepts a `Blob` and returns the `storageId` for the stored object.
+
+```typescript
+export const importFile = action({
+  args: { url: v.string() },
+  async handler(ctx, args) {
+    const response = await fetch(args.url)
+    const blob = await response.blob()
+    const storageId = await ctx.storage.store(blob)
+    return storageId
+  },
+})
+```
+
+Note that `ctx.storage.store()` is only available in **actions**, not mutations. Mutations have access to `generateUploadUrl()` and `delete()` but not `store()`, because large I/O operations belong in actions. The `StorageWriter` and `StorageActionWriter` interfaces in `baseflare/server` encode this distinction at the type level.
+
+## Planned `ctx.storage` API
+
+The `ctx.storage` interface is already defined in `packages/baseflare/src/server/functions/types.ts`. The runtime implementation backed by `env.FILES` (the R2 binding) is what remains to be built.
+
+| Method | Available In | Returns | Description |
+|---|---|---|---|
+| `ctx.storage.generateUploadUrl()` | Mutations | `Promise<string>` | Generates a short-lived signed URL for direct client-to-R2 upload. |
+| `ctx.storage.store(blob)` | Actions | `Promise<string>` | Uploads a `Blob` server-side and returns the storage ID. |
+| `ctx.storage.getUrl(id)` | Queries, Mutations, Actions | `Promise<string \| null>` | Returns a public or signed URL for a stored file, or `null` if the ID does not exist. |
+| `ctx.storage.getMetadata(id)` | Queries, Mutations, Actions | `Promise<{ size, contentType, uploadedAt } \| null>` | Returns file size, content type, and upload timestamp from R2 custom metadata. |
+| `ctx.storage.delete(id)` | Mutations, Actions | `Promise<void>` | Permanently deletes the R2 object. |
+
+File metadata (size, content type, upload timestamp) will be stored as R2 custom metadata on the object — no separate D1 table is needed. Storage IDs use a flat key namespace within the per-environment R2 bucket.
+
+## R2 Binding
+
+Each Baseflare environment has exactly one R2 bucket, provisioned automatically on first deploy and bound to the Worker as `env.FILES`. The bucket is named `bf-{project}-{env}-files` following the same naming convention as all other Cloudflare resources managed by Baseflare.
+
+The bucket is created via the Cloudflare API during `npx baseflare deploy` — you do not need to create it manually or add it to any configuration file. The CLI records the bucket name in `.baseflare/project.json` after provisioning.
+
+<Info>
+  R2 has **zero egress fees**, unlike S3 and most competing object storage services. This makes it especially well-suited for media-heavy applications, document storage, and any use case where files are read frequently by end users. Storage and operations are billed at standard R2 rates on your Cloudflare account, but you will never pay extra for bandwidth when files are delivered to clients.
+</Info>

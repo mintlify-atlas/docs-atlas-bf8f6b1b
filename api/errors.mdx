@@ -1,0 +1,256 @@
+---
+title: "Baseflare Error Classes and Error Codes"
+sidebarTitle: "Errors"
+description: "BaseflareError, ValidationError, and SchemaError from baseflare/values — typed errors for application logic, input validation failures, and schema definition problems."
+---
+
+Baseflare provides three error classes exported from `baseflare/values`, each serving a distinct purpose. `BaseflareError<T>` is for application-level typed errors you throw intentionally in your function handlers — the structured `data` payload propagates to the client intact. `ValidationError` is thrown automatically by validators when input fails a type check, and surfaces to the client as a `VALIDATION_ERROR` response. `SchemaError` is thrown at startup by `defineSchema()` and `defineTable()` when the schema definition is structurally invalid. Understanding which error to use and when is key to building predictable, well-typed APIs with Baseflare.
+
+## Import
+
+```typescript
+import {
+  BaseflareError,
+  ValidationError,
+  SchemaError,
+  ErrorCode,
+} from 'baseflare/values'
+```
+
+---
+
+## `BaseflareError<T>`
+
+`BaseflareError<T>` extends the native `Error` class and carries a typed `data` payload that is propagated to the calling client. Throw it from any query, mutation, or action handler to signal a business-logic failure with structured information the client can inspect and act on.
+
+**Class signature:**
+
+```typescript
+class BaseflareError<TData = undefined> extends Error {
+  readonly data: TData
+
+  constructor(data: TData, message?: string)
+}
+```
+
+<ParamField path="data" type="TData" required>
+  The structured payload attached to the error. Any serialisable value is valid. When `data` is a `string` and no explicit `message` is provided, the string is used as both the error message and the data payload.
+</ParamField>
+
+<ParamField path="message" type="string">
+  Optional human-readable error message. Defaults to the string value of `data` (when `data` is a string) or `"BaseflareError"` otherwise.
+</ParamField>
+
+**Example — throwing from a handler and catching on the client:**
+
+```typescript
+import { BaseflareError } from 'baseflare/values'
+
+// In a mutation handler:
+const stock = await ctx.db.get('inventory', args.productId)
+if (stock.remaining === 0) {
+  throw new BaseflareError({ code: 'OUT_OF_STOCK', remaining: 0 })
+}
+
+// On the client, the data payload is preserved:
+try {
+  await createOrder(args)
+} catch (e) {
+  if (e instanceof BaseflareError) {
+    console.log(e.data) // { code: 'OUT_OF_STOCK', remaining: 0 }
+  }
+}
+```
+
+**Example — string shorthand:**
+
+```typescript
+// When data is a string, it doubles as the error message:
+throw new BaseflareError('User has exceeded their quota')
+// e.message === 'User has exceeded their quota'
+// e.data    === 'User has exceeded their quota'
+```
+
+<Tip>
+  Use `BaseflareError` for business logic errors — out of stock, quota exceeded, feature not enabled, rate-limited — that the client needs to handle differently based on the payload. Use a regular `throw new Error()` for unexpected server-side failures; those surface as `INTERNAL_ERROR` responses and their message is not leaked to the client.
+</Tip>
+
+---
+
+## `ValidationError`
+
+`ValidationError` is thrown automatically by the validator runtime when a value fails a type check. You will encounter it when calling `.validate()` directly, or when Baseflare validates query/mutation arguments before your handler runs. The `path` property identifies exactly which field failed.
+
+**Class signature:**
+
+```typescript
+class ValidationError extends Error {
+  readonly code: 'VALIDATION_ERROR'
+  readonly path: string
+
+  constructor(path: string, message: string)
+}
+```
+
+<ResponseField name="path" type="string">
+  The dot-notation path to the field that failed validation (e.g., `"args.address.zip"`, `"value[2]"`). When validating a top-level value directly, `path` is `"value"`.
+</ResponseField>
+
+<ResponseField name="message" type="string">
+  A human-readable description of the failure, prefixed with the formatted path. For example: `"Value must have length at least 1"` or `"args.email must be a string"`.
+</ResponseField>
+
+**Example:**
+
+```typescript
+import { v, ValidationError } from 'baseflare/values'
+
+try {
+  v.string().min(1).validate('')
+} catch (e) {
+  if (e instanceof ValidationError) {
+    console.log(e.path)    // → 'value'
+    console.log(e.message) // → 'Value must have length at least 1'
+    console.log(e.code)    // → 'VALIDATION_ERROR'
+  }
+}
+
+// Nested path example:
+try {
+  v.object({ name: v.string() }).validate({ name: 42 })
+} catch (e) {
+  if (e instanceof ValidationError) {
+    console.log(e.path)    // → 'value.name'
+    console.log(e.message) // → 'value.name must be a string'
+  }
+}
+```
+
+---
+
+## `SchemaError`
+
+`SchemaError` is thrown at application startup by `defineSchema()` and `defineTable()` when the schema definition contains a structural problem. Because schema errors are caught immediately on boot, they will never surface to end-users in a running deployment — they are programming mistakes to be fixed before deploying.
+
+**Class signature:**
+
+```typescript
+class SchemaError extends Error {
+  readonly code: 'SCHEMA_ERROR'
+
+  constructor(message: string)
+}
+```
+
+**Conditions that throw `SchemaError`:**
+
+- No tables defined in the schema
+- Duplicate index name within a table
+- Partition index defined on a non-scalar field (arrays, objects, and records cannot be partition keys)
+- Reserved field names used (e.g., `_id`, `_createdAt`)
+- Reserved table names used
+
+```typescript
+import { defineTable } from 'baseflare/server'
+import { v } from 'baseflare/values'
+
+// ❌ SchemaError: duplicate index name
+defineTable({
+  fields: { name: v.string() },
+  indexes: [
+    { name: 'by_name', fields: ['name'] },
+    { name: 'by_name', fields: ['name'] }, // duplicate!
+  ],
+})
+```
+
+---
+
+## `ErrorCode`
+
+`ErrorCode` is a plain object constant (not a TypeScript `enum`) whose values are the string codes used in RPC error responses. Every error response from a Baseflare API has the shape `{ error: { code: string, message: string } }`.
+
+```typescript
+export const ErrorCode = {
+  Unauthorized:      'UNAUTHORIZED',
+  PermissionDenied:  'PERMISSION_DENIED',
+  NotFound:          'NOT_FOUND',
+  ValidationError:   'VALIDATION_ERROR',
+  SchemaError:       'SCHEMA_ERROR',
+  DeployError:       'DEPLOY_ERROR',
+  Conflict:          'CONFLICT',
+  DatabaseError:     'DATABASE_ERROR',
+  MalformedDocument: 'MALFORMED_DOCUMENT',
+  NotImplemented:    'NOT_IMPLEMENTED',
+  InternalError:     'INTERNAL_ERROR',
+} as const
+```
+
+<ResponseField name="ErrorCode.Unauthorized" type='"UNAUTHORIZED"'>
+  The request is not authenticated — no valid session or token was provided.
+</ResponseField>
+
+<ResponseField name="ErrorCode.PermissionDenied" type='"PERMISSION_DENIED"'>
+  The authenticated user does not have permission to perform the requested operation.
+</ResponseField>
+
+<ResponseField name="ErrorCode.NotFound" type='"NOT_FOUND"'>
+  The requested document or resource does not exist.
+</ResponseField>
+
+<ResponseField name="ErrorCode.ValidationError" type='"VALIDATION_ERROR"'>
+  A value failed schema or argument validation. The response will include the field path and a human-readable reason.
+</ResponseField>
+
+<ResponseField name="ErrorCode.SchemaError" type='"SCHEMA_ERROR"'>
+  The schema definition is invalid. Only occurs at deploy or startup time.
+</ResponseField>
+
+<ResponseField name="ErrorCode.DeployError" type='"DEPLOY_ERROR"'>
+  A schema deployment or migration failed.
+</ResponseField>
+
+<ResponseField name="ErrorCode.Conflict" type='"CONFLICT"'>
+  The operation conflicted with concurrent state (e.g., unique constraint violation).
+</ResponseField>
+
+<ResponseField name="ErrorCode.DatabaseError" type='"DATABASE_ERROR"'>
+  An unexpected error occurred in the database layer.
+</ResponseField>
+
+<ResponseField name="ErrorCode.MalformedDocument" type='"MALFORMED_DOCUMENT"'>
+  A document in the database does not conform to the declared schema.
+</ResponseField>
+
+<ResponseField name="ErrorCode.NotImplemented" type='"NOT_IMPLEMENTED"'>
+  The requested feature or operation is not yet implemented.
+</ResponseField>
+
+<ResponseField name="ErrorCode.InternalError" type='"INTERNAL_ERROR"'>
+  An unexpected internal server error. The message is not leaked to the client.
+</ResponseField>
+
+**Example error response body:**
+
+```json
+{
+  "error": {
+    "code": "PERMISSION_DENIED",
+    "message": "You do not have access to this resource"
+  }
+}
+```
+
+**Using `ErrorCode` constants in application code:**
+
+```typescript
+import { BaseflareError, ErrorCode } from 'baseflare/values'
+
+// Reference the constant instead of a raw string:
+throw new BaseflareError({ code: ErrorCode.NotFound })
+
+// Or check incoming error codes:
+if (response.error?.code === ErrorCode.Unauthorized) {
+  redirectToLogin()
+}
+```

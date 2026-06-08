@@ -1,47 +1,202 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Get Started with Baseflare in Minutes"
+sidebarTitle: "Quickstart"
+description: "Install Baseflare, define a schema and server functions, spin up the Worker runtime, and make your first API calls — all in under 15 minutes."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
-
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
-
-## Prerequisites
-
-Before you begin, you must have:
-
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
-
-## Get started
+By the end of this guide you will have a working Cloudflare Worker powered by Baseflare. You will define a `todos` collection with a schema, write a `listTodos` query and a `createTodo` mutation, wire them into the Worker entry point, and call both endpoints over HTTP. No Cloudflare account is required to follow along locally — you can run the Worker with [Wrangler's local mode](https://developers.cloudflare.com/workers/wrangler/commands/#dev) or deploy it manually when you are ready.
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
 
-    ```bash
-    npm install your-package
-    ```
-  </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
+### Install Baseflare
 
-    ```bash
-    your-cli init
-    ```
-  </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
+Add the `baseflare` package to your project. It ships as a single package with focused subpath exports for `baseflare/values` and `baseflare/server`.
 
-    ```bash
-    your-cli start
-    ```
-  </Step>
+<CodeGroup>
+
+```bash pnpm
+pnpm add baseflare
+```
+
+```bash npm
+npm install baseflare
+```
+
+```bash yarn
+yarn add baseflare
+```
+
+</CodeGroup>
+
+### Define your schema
+
+Create a `schema.ts` file in your functions directory. Import `defineSchema` and `defineTable` from `baseflare/server` and the `v` validator namespace from `baseflare/values`. Each table definition describes the shape of its documents; `.index()` creates a SQLite index on the named fields so queries on those fields are fast.
+
+```typescript schema.ts
+import { defineSchema, defineTable } from "baseflare/server";
+import { v } from "baseflare/values";
+
+export const schema = defineSchema({
+  todos: defineTable({
+    ownerId: v.string(),
+    text: v.string().min(1).max(280),
+    completed: v.boolean().default(false),
+    tags: v.array(v.string()).default([]),
+  }).index("by_owner", ["ownerId"]),
+});
+```
+
+Baseflare uses a document model: every table stores a single `_data` JSON column alongside its `_id`. The field definitions above are enforced at write time by the Worker runtime — no database-level constraints are required.
+
+### Define permissions
+
+Create a `rules.ts` file and export your access rules with `defineRules`. Rules are **deny-by-default**: any table or operation that has no matching rule will refuse access. The `ctx.auth.getUserIdentity()` call resolves the caller's identity from the request token.
+
+```typescript rules.ts
+import { defineRules } from "baseflare/server";
+
+export const rules = defineRules({
+  todos: {
+    read: async ({ ctx, doc }) =>
+      doc.ownerId === (await ctx.auth.getUserIdentity()),
+    insert: async ({ ctx, value }) =>
+      value.ownerId === (await ctx.auth.getUserIdentity()),
+    update: async ({ ctx, existingDoc }) =>
+      existingDoc.ownerId === (await ctx.auth.getUserIdentity()),
+    delete: async ({ ctx, existingDoc }) =>
+      existingDoc.ownerId === (await ctx.auth.getUserIdentity()),
+  },
+});
+```
+
+Each rule is an `async` function that receives typed context and returns a `boolean`. Returning `false` — or having no rule at all — denies the operation and surfaces a `PERMISSION_DENIED` error to the caller.
+
+### Write a query
+
+Queries read documents and return typed data. They never write to the database. Create a `queries.ts` file and export a `listTodos` function using the `query` wrapper from `baseflare/server`.
+
+```typescript queries.ts
+import { query } from "baseflare/server";
+import { v } from "baseflare/values";
+
+export const listTodos = query({
+  args: {
+    ownerId: v.string(),
+  },
+  returns: v.array(v.any()),
+  async handler(ctx, args) {
+    return await ctx.db
+      .query("todos")
+      .filter({ ownerId: args.ownerId })
+      .order("_createdAt", "desc")
+      .limit(50)
+      .collect();
+  },
+});
+```
+
+The `ctx.db.query()` call returns a fluent query builder. `.filter()` accepts a plain object of field matchers, `.order()` sorts by any field (including the derived `_createdAt`), `.limit()` caps the result set, and `.collect()` executes and returns all matching documents.
+
+### Write a mutation
+
+Mutations are the atomic write primitive. Create a `mutations.ts` file and export a `createTodo` function using the `mutation` wrapper. The runtime validates the return value against the `returns` validator before committing any writes.
+
+```typescript mutations.ts
+import { mutation } from "baseflare/server";
+import { v } from "baseflare/values";
+
+export const createTodo = mutation({
+  args: {
+    ownerId: v.string(),
+    text: v.string().min(1).max(280),
+  },
+  returns: v.string(),
+  async handler(ctx, args) {
+    return await ctx.db.insert("todos", {
+      ownerId: args.ownerId,
+      text: args.text,
+      completed: false,
+      tags: [],
+    });
+  },
+});
+```
+
+`ctx.db.insert()` validates the document against the schema, serializes it to JSON, writes it to D1, and returns the new document's `_id` string — a plain UUIDv7.
+
+### Create the Worker
+
+Wire your schema, rules, and functions into a Cloudflare Worker using `createWorker` from `baseflare/server`. The returned object is a standard Cloudflare Workers `fetch` handler with path-based RPC routing already configured.
+
+```typescript worker.ts
+import { createWorker } from "baseflare/server";
+
+import { schema } from "./schema";
+import { rules } from "./rules";
+import * as queries from "./queries";
+import * as mutations from "./mutations";
+
+export default createWorker({
+  schema,
+  rules,
+  functions: [
+    ...Object.values(queries),
+    ...Object.values(mutations),
+  ],
+});
+```
+
+`createWorker` accepts a `BaseflareManifest` with at minimum a `schema` and your function entries. It builds an internal function index and exposes RPC routes at `/api/query/:name`, `/api/mutation/:name`, and `/api/action/:name`.
+
+### Call the API
+
+Once your Worker is running — locally via Wrangler or deployed to Cloudflare — you can call your functions over HTTP using a simple JSON body.
+
+**Call `listTodos`:**
+
+```bash
+curl -X POST http://localhost:8787/api/query/listTodos \
+  -H "Content-Type: application/json" \
+  -d '{"args": {"ownerId": "user_123"}}'
+```
+
+```json
+{
+  "result": [
+    {
+      "_id": "019078e5-d29f-7b00-8000-1a2b3c4d5e6f",
+      "_createdAt": 1709000000000,
+      "ownerId": "user_123",
+      "text": "Ship the Baseflare quickstart",
+      "completed": false,
+      "tags": []
+    }
+  ]
+}
+```
+
+**Call `createTodo`:**
+
+```bash
+curl -X POST http://localhost:8787/api/mutation/createTodo \
+  -H "Content-Type: application/json" \
+  -d '{"args": {"ownerId": "user_123", "text": "Ship the Baseflare quickstart"}}'
+```
+
+```json
+{
+  "result": "019078e5-d29f-7b00-8000-1a2b3c4d5e6f"
+}
+```
+
+Every RPC request body must be a JSON object with exactly one key — `"args"` — whose value is the arguments object for your function. Any other shape returns a `VALIDATION_ERROR`.
+
 </Steps>
 
-<Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
+<Note>
+  The CLI deploy workflow (`npx baseflare deploy`) is in active development and is not yet available. For now, you can run the Worker locally with `wrangler dev` or deploy it manually using `wrangler deploy` or the Cloudflare dashboard. Point Wrangler at your `worker.ts` entry file and bind a D1 database named `APP_DB`.
+</Note>
 
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
+<Tip>
+  Ready to go deeper? Check out the guides for [schema definition](/concepts#document-model), [queries](/concepts#function-types), [mutations](/concepts#function-types), and [permissions](/concepts#permissions) in the Concepts page.
 </Tip>

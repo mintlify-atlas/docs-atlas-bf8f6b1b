@@ -1,0 +1,113 @@
+---
+title: "Authentication with defineAuth and better-auth"
+sidebarTitle: "Auth"
+description: "Baseflare plans to integrate better-auth v1.6 via a custom document adapter, storing auth data in the same D1 tables. ctx.auth provides the current user in all function contexts."
+---
+
+Authentication is a planned feature for Baseflare that will be delivered in Phase 5 of the implementation roadmap. When implemented, Baseflare will integrate [better-auth v1.6](https://www.better-auth.com/) through a custom document model adapter. Auth data — users, sessions, accounts, and verifications — will be stored in your environment's D1 database using the same two-column `_id` / `_data` document format as all other Baseflare tables. This means auth rows live alongside your app data, participate in D1 Time Travel backups, and require no separate database or managed auth service.
+
+<Note>
+  Authentication is a **planned feature** currently in active development and is not yet available in any released version of Baseflare. The API described on this page reflects the intended design based on the Phase 5 implementation plan.
+</Note>
+
+## `defineAuth()` API
+
+Auth is configured by creating a `baseflare/auth.ts` file in your functions directory and calling `defineAuth()`. The function accepts the full better-auth configuration object — every option that better-auth supports passes through 1:1 with no translation layer. Baseflare only adds the custom D1 document adapter behind the scenes.
+
+```typescript
+// baseflare/auth.ts
+import { defineAuth } from 'baseflare/server'
+
+export default defineAuth({
+  emailAndPassword: { enabled: true },
+  socialProviders: {
+    google: {
+      clientId: process.env.GOOGLE_CLIENT_ID!,
+      clientSecret: process.env.GOOGLE_CLIENT_SECRET!,
+    },
+  },
+  // All better-auth options pass through 1:1
+})
+```
+
+The codegen pipeline will detect `baseflare/auth.ts` and wire the better-auth handler into the Worker automatically. You do not need to add any routes manually or configure bindings — the deploy pipeline handles provisioning.
+
+## Auth Table Naming
+
+Auth data is stored in reserved D1 tables that use the `_auth_` prefix. The prefix is reserved by Baseflare — developer-defined table names may not start with `_`. The four planned auth tables are:
+
+| Table | Contents |
+|---|---|
+| `_auth_user` | User records (email, name, provider data) |
+| `_auth_session` | Active sessions (token, expiry, user reference) |
+| `_auth_account` | OAuth account links (provider, provider account ID) |
+| `_auth_verification` | Email verification and password reset tokens |
+
+All four tables use the same document model as your application tables: `_id TEXT PRIMARY KEY, _data TEXT NOT NULL`. Auth table migrations run on deploy alongside your application table migrations — there is nothing extra to manage.
+
+The Baseflare document adapter for better-auth stores all field values as JSON text inside `_data`. Indexes on frequently queried auth fields (email, session token, user ID) are created automatically at deploy time using the same `json_extract()` index pattern as application tables.
+
+## `ctx.auth` in Functions
+
+Once auth is configured, `ctx.auth` is available in every query, mutation, and action handler. It exposes a single method: `ctx.auth.getUserIdentity()`, which returns the current user's identity (their user ID) derived from the session token on the incoming request.
+
+```typescript
+export const listTodos = query({
+  args: { },
+  async handler(ctx) {
+    const userId = await ctx.auth.getUserIdentity()
+    if (!userId) throw new Error('Unauthenticated')
+    return await ctx.db.query('todos').filter({ ownerId: userId }).collect()
+  },
+})
+```
+
+The `Auth` interface is already present in `baseflare/server` today:
+
+```typescript
+interface Auth {
+  getUserIdentity(): MaybePromise<unknown>
+}
+```
+
+When auth is not configured, `ctx.auth.getUserIdentity()` returns `null`. When auth is configured, it returns the authenticated user's ID or `null` for unauthenticated requests. Permission rules can use this to enforce row-level access — the deny-by-default permission system makes unauthenticated access explicitly opt-in.
+
+## HTTP Routes
+
+Auth endpoints are automatically mounted at `/api/auth/*` on the environment Worker. Requests to those paths are handled by the better-auth handler, which manages sign-up, sign-in, sign-out, OAuth redirects, and token verification. No additional routing configuration is required.
+
+```bash
+# Sign up with email and password
+curl -X POST https://your-worker.workers.dev/api/auth/sign-up/email \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "password": "secret123"}'
+
+# Sign in and receive a session token
+curl -X POST https://your-worker.workers.dev/api/auth/sign-in/email \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "password": "secret123"}'
+```
+
+The response from sign-in includes a session token. That token is used on all subsequent requests to authenticate the caller.
+
+## Token Usage
+
+After signing in, the client receives a session token from better-auth. All subsequent data plane requests — queries, mutations, actions, and WebSocket subscriptions — should include this token in the `Authorization` header using the Bearer scheme:
+
+```bash
+# Authenticated query using the session token
+curl -X POST https://your-worker.workers.dev/api/query/todos:list \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <session-token>" \
+  -d '{"args": {}}'
+```
+
+The Worker extracts the token from the `Authorization` header on every request, validates it against the `_auth_session` table in D1, and populates `ctx.auth` before the function handler runs. Tokens are validated per-request using a per-request better-auth instance — this is important for the Cloudflare Workers execution model, where you cannot share stateful objects across requests.
+
+The `baseflare/client` SDK and `@baseflare/react` hooks will handle token storage and header injection automatically once the client SDK ships.
+
+## Why better-auth
+
+<Info>
+  Baseflare uses better-auth rather than rolling a custom auth implementation for three reasons. First, better-auth has native D1 support, which means it integrates naturally with the Cloudflare Workers runtime without requiring a Postgres adapter or an external managed service. Second, it follows a per-request instance pattern — each request creates a fresh better-auth instance with the current D1 binding, which is the correct model for Workers where bindings are only available inside the fetch handler. Third, better-auth has an extensive provider ecosystem covering email/password, magic links, passkeys, and dozens of OAuth providers out of the box — all configurable through the same `defineAuth()` call with no extra packages needed.
+</Info>

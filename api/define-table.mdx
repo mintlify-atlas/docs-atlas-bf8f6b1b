@@ -1,0 +1,141 @@
+---
+title: "defineTable() — Declare a Table Schema and Indexes"
+sidebarTitle: "defineTable"
+description: "defineTable(fields) creates a TableBuilder that maps field names to Baseflare validators and adds indexes via .index(). Used inside defineSchema()."
+---
+
+`defineTable` creates a `TableBuilder` from a map of field names to validators. The `TableBuilder` it returns is passed as a value inside the `tables` object given to `defineSchema()` — you never instantiate a table directly. Validators come from the `v.*` namespace exported by `baseflare/values`, which handles type coercion, defaults, and optional fields uniformly across the client and server.
+
+## Signature
+
+```typescript
+function defineTable<TFields extends ValidatorShape>(
+  fields: TFields
+): TableBuilder<TFields>
+```
+
+## Parameters
+
+<ParamField path="fields" type="ValidatorShape" required>
+  A plain object where each key is a field name and each value is a validator from
+  `v.*`. Field names must be valid identifiers and must not start with `_` (those
+  are reserved for framework-managed fields such as `_id` and `_createdAt`). At
+  least one field is required.
+</ParamField>
+
+## Returns
+
+A `TableBuilder<TFields>` object. `TableBuilder` extends `TableDefinition` and exposes a single chainable method, `.index()`.
+
+## `TableBuilder.index(name, fields, options?)`
+
+Adds an index to the table definition. Returns a **new** `TableBuilder` with the index appended — `defineTable` and `.index()` are immutable and safe to store and share.
+
+<ParamField path="name" type="string" required>
+  The index name. Must match `/^[A-Za-z][A-Za-z0-9_]*$/`. Combined with the table
+  name to produce the final SQL identifier, e.g. `todos_by_owner`. Must be unique
+  within the table.
+</ParamField>
+
+<ParamField path="fields" type="readonly string[]" required>
+  The ordered list of field names to include in the index. Each name must exist in
+  the table definition. At least one field is required. Field order matters — it
+  determines the left-to-right column order in the resulting `CREATE INDEX` statement.
+</ParamField>
+
+<ParamField path="options" type="TableIndexOptions">
+  Optional configuration object. Currently supports one key:
+
+  - `partition?: boolean` — marks this index as the table's partition index.
+    See the [Partition Indexes](#partition-indexes) section below.
+</ParamField>
+
+### Throws
+
+- `SchemaError` if the index name duplicates an existing index on the same table.
+- `SchemaError` if `partition: true` is passed when a partition index is already registered on this builder.
+
+## Validation Rules
+
+`defineTable` validates these constraints immediately at call time:
+
+- The `fields` object must contain at least one entry.
+- Every field name must match `/^[A-Za-z][A-Za-z0-9_]*$/` and must not start with `_`.
+- Every value in `fields` must be a Baseflare validator (an object with a `validate` method).
+- For `.index()`: the `fields` array must not be empty.
+- For `.index()`: every listed field name must already exist in the table's field map.
+
+## Generated SQL
+
+Indexes are stored as `json_extract()` expressions over the `_data` JSON column. A single-field index generates:
+
+```sql
+-- .index('by_owner', ['ownerId'])
+CREATE INDEX todos_by_owner ON todos (json_extract(_data, '$.ownerId'));
+```
+
+A composite index generates one expression per field, in order:
+
+```sql
+-- .index('by_org_and_status', ['orgId', 'status'])
+CREATE INDEX todos_by_org_and_status ON todos (
+  json_extract(_data, '$.orgId'),
+  json_extract(_data, '$.status')
+);
+```
+
+Every table also receives a system-managed `_id TEXT PRIMARY KEY` column and a `_data TEXT NOT NULL` column — you never declare those yourself.
+
+## Partition Indexes
+
+A partition index is a hint to the Baseflare runtime that most reads and writes for a given table cluster around a natural grouping: a channel, a project, a tenant, a user. Baseflare uses this annotation to track per-partition version counters, which allows the real-time subscription system to cheaply detect changes within a partition without scanning the entire table.
+
+Use `{ partition: true }` when there is a clear dominant access pattern:
+
+```typescript
+import { defineTable } from 'baseflare/server'
+import { v } from 'baseflare/values'
+
+defineTable({
+  channelId: v.string(),
+  text: v.string(),
+  authorId: v.string(),
+}).index('by_channel', ['channelId'], { partition: true })
+```
+
+Rules for partition indexes:
+
+- Each table may have **at most one** partition index.
+- Partition indexes may only reference scalar field types (`boolean`, `enum`, `id`, `literal`, `number`, `string`).
+- When a table has exactly one index and no `partition` option is provided, that index is automatically treated as the partition index.
+- When a table has multiple indexes, you must explicitly mark one with `{ partition: true }` or opt every index out with `{ partition: false }`.
+
+<Tip>
+  If your table is append-only and you only ever query it in full (no per-user
+  or per-entity filtering), set `{ partition: false }` on all indexes to opt out
+  of partition tracking entirely.
+</Tip>
+
+## Full Example
+
+```typescript
+import { defineSchema, defineTable } from 'baseflare/server'
+import { v } from 'baseflare/values'
+
+export const schema = defineSchema({
+  messages: defineTable({
+    channelId: v.string(),
+    authorId: v.string(),
+    text: v.string().min(1).max(2000),
+    editedAt: v.number().optional(),
+  })
+    .index('by_channel', ['channelId'], { partition: true })
+    .index('by_author', ['authorId'], { partition: false }),
+
+  channels: defineTable({
+    workspaceId: v.string(),
+    name: v.string().min(1).max(80),
+    isPrivate: v.boolean().default(false),
+  }).index('by_workspace', ['workspaceId']),
+})
+```

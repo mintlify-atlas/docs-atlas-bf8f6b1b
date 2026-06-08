@@ -1,0 +1,175 @@
+---
+title: "createWorker() — Assemble the Cloudflare Worker Entry Point"
+sidebarTitle: "createWorker"
+description: "createWorker(manifest) takes your schema, rules, functions, and HTTP router and returns a Cloudflare ExportedHandler — the Worker's default export that handles all incoming requests."
+---
+
+`createWorker` is the glue that assembles your Baseflare backend into a deployable Cloudflare Worker. It accepts a `BaseflareManifest` object describing your schema, permission rules, server functions, and optional HTTP router, and returns an `ExportedHandler` — a Cloudflare Workers-compatible object with a `fetch` method. The return value is meant to be the `default` export of your Worker entry file.
+
+## Signature
+
+```typescript
+function createWorker<TEnv extends BaseflareRuntimeEnv = BaseflareRuntimeEnv>(
+  manifest: BaseflareManifest
+): ExportedHandler<TEnv>
+```
+
+---
+
+## `BaseflareManifest`
+
+<ParamField path="schema" type="Schema" required>
+  The validated schema returned by `defineSchema()`. Used to resolve table
+  definitions for write validation and to power the D1 DDL during deployment.
+</ParamField>
+
+<ParamField path="rules" type="Rules">
+  Permission rules returned by `defineRules()`. If omitted, **all** database
+  operations across all tables are denied. Pass an empty object `{}` only if
+  you intend for all tables to be inaccessible from client-callable functions
+  (e.g. a server-functions-only architecture using only internal functions).
+</ParamField>
+
+<ParamField path="queryEntries" type="BaseflareFunctionEntry[]">
+  Public query function entries. Typically assembled by the CLI's code generation
+  step from your functions directory. Each entry carries the function definition,
+  its export name, module path, and canonical name.
+</ParamField>
+
+<ParamField path="mutationEntries" type="BaseflareFunctionEntry[]">
+  Public mutation function entries.
+</ParamField>
+
+<ParamField path="actionEntries" type="BaseflareFunctionEntry[]">
+  Public action function entries.
+</ParamField>
+
+<ParamField path="internalQueryEntries" type="BaseflareFunctionEntry[]">
+  Internal query function entries. Not reachable via HTTP — only via
+  `ctx.runQuery()`.
+</ParamField>
+
+<ParamField path="internalMutationEntries" type="BaseflareFunctionEntry[]">
+  Internal mutation function entries. Not reachable via HTTP — only via
+  `ctx.runMutation()`.
+</ParamField>
+
+<ParamField path="internalActionEntries" type="BaseflareFunctionEntry[]">
+  Internal action function entries. Not reachable via HTTP — only via
+  `ctx.runAction()`.
+</ParamField>
+
+<ParamField path="http" type="HttpRouter">
+  An optional `HttpRouter` instance created with `httpRouter()`. Registers
+  custom HTTP endpoints that are dispatched after the built-in RPC routes.
+</ParamField>
+
+<ParamField path="config" type="BaseflareConfig">
+  Optional project configuration returned by `defineConfig()`. Controls CORS
+  policy, request limits, and Cloudflare Worker settings at runtime.
+</ParamField>
+
+---
+
+## Example Worker Entry Point
+
+```typescript
+import { createWorker } from 'baseflare/server'
+import { schema } from './schema'
+import { rules } from './rules'
+import * as queries from './queries'
+import * as mutations from './mutations'
+import http from './http'
+
+export default createWorker({
+  schema,
+  rules,
+  http,
+  // Function entries are assembled by the CLI; shown here for illustration:
+  queryEntries: Object.entries(queries)
+    .filter(([, def]) => def.kind === 'query' && def.visibility === 'public')
+    .map(([exportName, definition]) => ({
+      definition,
+      exportName,
+      modulePath: 'queries',
+      name: `queries:${exportName}`,
+    })),
+  mutationEntries: Object.entries(mutations)
+    .filter(([, def]) => def.kind === 'mutation' && def.visibility === 'public')
+    .map(([exportName, definition]) => ({
+      definition,
+      exportName,
+      modulePath: 'mutations',
+      name: `mutations:${exportName}`,
+    })),
+})
+```
+
+<Tip>
+  In practice you rarely write the manifest by hand. The Baseflare CLI
+  auto-generates the Worker entry point from your `baseflare/` functions
+  directory. The above example illustrates the manifest shape for custom setups
+  or testing.
+</Tip>
+
+---
+
+## Request Routing Order
+
+`createWorker` evaluates each incoming request against routes in this order:
+
+1. **`POST /api/query/:name`** — looks up a public query by canonical name and executes it with a read-only database context.
+2. **`POST /api/mutation/:name`** — looks up a public mutation and executes it in a serializable D1 transaction.
+3. **`POST /api/action/:name`** — looks up a public action and executes it with an action context (no direct `ctx.db`).
+4. **Custom HTTP routes** — if a `http` router is provided, `router.lookup(method, pathname)` is called; the first matching handler (exact before prefix) is invoked.
+5. **404** — if nothing matches, a structured JSON `404 Not Found` response is returned.
+
+<Note>
+  RPC routes only accept `POST`. Sending a `GET` to `/api/query/myQuery` returns
+  a `400 Bad Request` with a descriptive error explaining that the RPC method
+  requires `POST`.
+</Note>
+
+---
+
+## `BaseflareRuntimeEnv`
+
+The Worker bindings Baseflare requires in the Cloudflare environment object:
+
+<ParamField path="APP_DB" type="D1Database" required>
+  The D1 database binding. Configure it in `wrangler.toml`:
+
+  ```toml
+  [[d1_databases]]
+  binding = "APP_DB"
+  database_name = "bf-my-app-prod"
+  database_id   = "<your-d1-database-id>"
+  ```
+</ParamField>
+
+<Info>
+  Additional bindings such as R2 (file storage), Durable Objects (real-time
+  subscriptions), and Vectorize (vector search) are planned for Phase 2+.
+</Info>
+
+---
+
+## Error Handling
+
+`createWorker` wraps the entire request lifecycle in a `try/catch`. Errors are converted to structured JSON responses:
+
+| Error type | HTTP status |
+|---|---|
+| `ValidationError` / malformed request | `400 Bad Request` |
+| Not-found function or route | `404 Not Found` |
+| Permission denied | `403 Forbidden` |
+| Unexpected / unhandled error | `500 Internal Server Error` |
+
+Unexpected errors (those that are not `RuntimeError`, `BaseflareError`, `ValidationError`, or `SchemaError`) are logged to the Cloudflare Workers logging pipeline with a `runtime.unexpected_error` event name before the `500` response is returned.
+
+<Note>
+  `createWorker` does **not** run DDL. The `CREATE TABLE` and `CREATE INDEX`
+  statements from `schema.toCreateStatements()` are a deploy-time step executed
+  by the CLI before any traffic reaches the Worker. The schema your Worker
+  receives at runtime is assumed to already be applied in D1.
+</Note>

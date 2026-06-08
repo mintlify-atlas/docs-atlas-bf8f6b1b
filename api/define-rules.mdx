@@ -1,0 +1,176 @@
+---
+title: "defineRules() — Declare Baseflare Permission Rules"
+sidebarTitle: "defineRules"
+description: "defineRules() sets up deny-by-default access control for each table, gating read, insert, update, and delete operations by returning a boolean from async rule functions."
+---
+
+`defineRules` is a thin identity function that types a `Rules` object — it returns its argument unchanged. The real enforcement happens in the runtime, where `evaluateRules` is called before every database operation: before every `get` and `query` result is returned, before every `insert`, before every `patch` or `replace`, and before every `delete`. The model is **deny by default**: unless an explicit rule function returns `true`, the operation is blocked.
+
+## Signature
+
+```typescript
+function defineRules<TRules extends Rules>(rules: TRules): TRules
+```
+
+## `Rules` Type Structure
+
+`Rules` is a two-level nested object:
+
+```typescript
+type Rules = Record<string, TableRules>
+```
+
+The top-level key is a **table name** (matching a table in your schema). Each value is a `TableRules` object with optional `read`, `insert`, `update`, and `delete` keys. Missing operation keys default to `false` — the operation is denied.
+
+```typescript
+interface TableRules {
+  read?:   (input: ReadRuleInput)   => boolean | Promise<boolean>
+  insert?: (input: InsertRuleInput) => boolean | Promise<boolean>
+  update?: (input: UpdateRuleInput) => boolean | Promise<boolean>
+  delete?: (input: DeleteRuleInput) => boolean | Promise<boolean>
+}
+```
+
+## Rule Operation Signatures
+
+### `read`
+
+Called once **per document** when returning results from `ctx.db.get()` or `ctx.db.query()`. Documents for which the rule returns `false` are silently filtered out — they are invisible to the handler.
+
+```typescript
+read: (input: { ctx: QueryCtx; doc: Doc }) => boolean | Promise<boolean>
+```
+
+<ParamField path="input.ctx" type="QueryCtx">
+  The full query context, including `ctx.auth` and `ctx.db`.
+</ParamField>
+
+<ParamField path="input.doc" type="Doc">
+  The candidate document being evaluated. Includes all stored fields plus
+  `_id` and `_createdAt`.
+</ParamField>
+
+---
+
+### `insert`
+
+Called before a document is written by `ctx.db.insert()`. Receives the validated field values that would be stored.
+
+```typescript
+insert: (input: { ctx: MutationCtx; value: DocumentData }) => boolean | Promise<boolean>
+```
+
+<ParamField path="input.ctx" type="MutationCtx">
+  The full mutation context.
+</ParamField>
+
+<ParamField path="input.value" type="DocumentData">
+  The validated document data about to be inserted (no `_id` yet).
+</ParamField>
+
+---
+
+### `update`
+
+Called before a document is modified by `ctx.db.patch()` or `ctx.db.replace()`. Receives both the existing document and the merged/replacement data.
+
+```typescript
+update: (input: {
+  ctx: MutationCtx
+  existingDoc: Doc
+  value: DocumentData
+}) => boolean | Promise<boolean>
+```
+
+<ParamField path="input.ctx" type="MutationCtx">
+  The full mutation context.
+</ParamField>
+
+<ParamField path="input.existingDoc" type="Doc">
+  The current document as stored in the database.
+</ParamField>
+
+<ParamField path="input.value" type="DocumentData">
+  The proposed new document data after the patch or replace is applied.
+</ParamField>
+
+---
+
+### `delete`
+
+Called before a document is removed by `ctx.db.delete()`.
+
+```typescript
+delete: (input: { ctx: MutationCtx; existingDoc: Doc }) => boolean | Promise<boolean>
+```
+
+<ParamField path="input.ctx" type="MutationCtx">
+  The full mutation context.
+</ParamField>
+
+<ParamField path="input.existingDoc" type="Doc">
+  The document about to be deleted.
+</ParamField>
+
+---
+
+## Full Example
+
+```typescript
+import { defineRules } from 'baseflare/server'
+
+export const rules = defineRules({
+  todos: {
+    read: async ({ ctx, doc }) =>
+      doc.ownerId === (await ctx.auth.getUserIdentity()),
+
+    insert: async ({ ctx, value }) =>
+      value.ownerId === (await ctx.auth.getUserIdentity()),
+
+    update: async ({ ctx, existingDoc }) =>
+      existingDoc.ownerId === (await ctx.auth.getUserIdentity()),
+
+    delete: async ({ ctx, existingDoc }) =>
+      existingDoc.ownerId === (await ctx.auth.getUserIdentity()),
+  },
+
+  users: {
+    // Anyone can read users (e.g. for profile lookups)
+    read: async () => true,
+
+    // Only the user themselves can update their own record
+    update: async ({ ctx, existingDoc }) =>
+      existingDoc._id === (await ctx.auth.getUserIdentity()),
+
+    // Inserts and deletes are managed server-side only
+  },
+})
+```
+
+<Warning>
+  A table missing from `defineRules()` denies ALL operations for that table —
+  even if no rules object is passed to `createWorker`. Always define rules for
+  every table you intend to access from client-callable functions.
+</Warning>
+
+---
+
+## `evaluateRules(rules, input)`
+
+`evaluateRules` is an internal function also exported from `baseflare/server` that the runtime calls before every database operation. Developers generally do not call it directly — it is documented here for completeness and for custom runtime integrations.
+
+```typescript
+function evaluateRules(rules: Rules, input: EvaluationInput): Promise<boolean>
+```
+
+`EvaluationInput` is a discriminated union over `tableName` and `operation`:
+
+```typescript
+type EvaluationInput =
+  | ({ tableName: string; operation: 'read' }   & ReadRuleInput)
+  | ({ tableName: string; operation: 'insert' } & InsertRuleInput)
+  | ({ tableName: string; operation: 'update' } & UpdateRuleInput)
+  | ({ tableName: string; operation: 'delete' } & DeleteRuleInput)
+```
+
+The function looks up `rules[tableName]` and dispatches to the correct operation handler. If no table entry or no operation handler is found, it returns `false`.

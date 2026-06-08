@@ -1,0 +1,177 @@
+---
+title: "HttpRouter and httpAction — Custom HTTP Endpoints"
+sidebarTitle: "HttpRouter"
+description: "httpRouter() creates an HttpRouter for registering custom HTTP action handlers. httpAction() wraps handler functions that receive a Request and return a Response."
+---
+
+Baseflare supports custom HTTP endpoints alongside the RPC system. Use `httpRouter()` to create a router and `httpAction()` to define handlers. The router dispatches incoming requests using **exact path matching first**, then **longest-prefix matching** as a fallback. Custom HTTP routes are processed after the built-in `/api/query/`, `/api/mutation/`, and `/api/action/` routes. Pass the router to `createWorker` via the `http` field of the manifest.
+
+## `httpRouter()`
+
+Creates and returns a new `HttpRouter` instance.
+
+```typescript
+function httpRouter(): HttpRouter
+```
+
+---
+
+## `HttpRouter.route(config)`
+
+Registers an exact-path route. Exact matches always take priority over prefix matches.
+
+<ParamField path="config.path" type="string" required>
+  The exact request path to match. Must start with `/`. Example: `'/webhooks/stripe'`.
+</ParamField>
+
+<ParamField path="config.method" type="string" required>
+  The HTTP method to match (case-insensitive internally). Examples: `'GET'`, `'POST'`, `'PUT'`.
+</ParamField>
+
+<ParamField path="config.handler" type="HttpAction" required>
+  An `HttpAction` created with `httpAction()`.
+</ParamField>
+
+Throws an `Error` if the same `method` + `path` combination is registered twice.
+
+---
+
+## `HttpRouter.routeWithPrefix(config)`
+
+Registers a prefix route. When multiple prefix routes match a request path, the **longest matching prefix** wins.
+
+<ParamField path="config.pathPrefix" type="string" required>
+  The path prefix to match. Must start with `/`. A request for `/api/files/foo/bar`
+  matches the prefix `/api/files/`.
+</ParamField>
+
+<ParamField path="config.method" type="string" required>
+  The HTTP method to match (case-insensitive).
+</ParamField>
+
+<ParamField path="config.handler" type="HttpAction" required>
+  An `HttpAction` created with `httpAction()`.
+</ParamField>
+
+Throws an `Error` if the same `method` + `pathPrefix` combination is registered twice.
+
+---
+
+## `HttpRouter.lookup(method, path)`
+
+Resolves a method and path to the registered handler. Checks exact routes first, then prefix routes sorted by descending prefix length. Returns `null` if no route matches.
+
+```typescript
+lookup(method: string, path: string): HttpActionHandler | null
+```
+
+<Note>
+  `lookup` is called internally by `createWorker` for every incoming request. You
+  generally do not need to call it directly.
+</Note>
+
+---
+
+## `httpAction(handler)`
+
+Wraps a handler function as an `HttpAction` suitable for passing to `HttpRouter.route()` or `HttpRouter.routeWithPrefix()`.
+
+```typescript
+function httpAction(
+  handler: (ctx: ActionCtx, request: Request) => Response | Promise<Response>
+): HttpAction
+```
+
+<ParamField path="handler" type="(ctx: ActionCtx, request: Request) => Response | Promise<Response>" required>
+  The handler function. Receives the same `ActionCtx` as an `action()` handler
+  (with `ctx.runQuery`, `ctx.runMutation`, `ctx.runAction`, `ctx.auth`, etc.) and
+  the raw `Request` object from the Cloudflare Workers runtime. Must return a
+  `Response`.
+</ParamField>
+
+<Warning>
+  Like `action()` handlers, `httpAction` handlers do **not** have `ctx.db`.
+  All database access must go through `ctx.runQuery()` or `ctx.runMutation()`.
+</Warning>
+
+---
+
+## HTTP Method Types
+
+The `HttpMethod` type exported from `baseflare/server` covers the standard set:
+
+```typescript
+type HttpMethod =
+  | 'GET'
+  | 'POST'
+  | 'PUT'
+  | 'PATCH'
+  | 'DELETE'
+  | 'OPTIONS'
+  | 'HEAD'
+```
+
+The `method` parameter on `route()` and `routeWithPrefix()` accepts any string — it is not constrained to `HttpMethod` — to allow forwarding of non-standard methods. The comparison is case-insensitive.
+
+---
+
+## Complete Example
+
+```typescript
+import { httpRouter, httpAction } from 'baseflare/server'
+import { handleStripeEvent } from './mutations'
+
+const stripeWebhook = httpAction(async (ctx, request) => {
+  const sig = request.headers.get('stripe-signature')
+  if (!sig) {
+    return new Response('Missing signature', { status: 400 })
+  }
+
+  const body = await request.text()
+  // Verify the Stripe webhook signature here...
+
+  await ctx.runMutation(handleStripeEvent, { body })
+  return new Response('ok', { status: 200 })
+})
+
+const serveFile = httpAction(async (ctx, request) => {
+  const url = new URL(request.url)
+  const fileId = url.pathname.replace('/files/', '')
+  const fileUrl = await ctx.runQuery(getFileUrl, { fileId })
+
+  if (!fileUrl) {
+    return new Response('Not found', { status: 404 })
+  }
+
+  return Response.redirect(fileUrl, 302)
+})
+
+const http = httpRouter()
+
+// Exact route
+http.route({
+  path: '/webhooks/stripe',
+  method: 'POST',
+  handler: stripeWebhook,
+})
+
+// Prefix route — matches /files/*, /files/folder/image.png, etc.
+http.routeWithPrefix({
+  pathPrefix: '/files/',
+  method: 'GET',
+  handler: serveFile,
+})
+
+export default http
+```
+
+Then wire it into your Worker:
+
+```typescript
+import { createWorker } from 'baseflare/server'
+import { schema } from './schema'
+import { rules } from './rules'
+import http from './http'
+
+export default createWorker({ schema, rules, http })
+```

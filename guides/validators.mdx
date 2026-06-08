@@ -1,0 +1,101 @@
+---
+title: "Validate Arguments and Return Values with Baseflare Validators"
+sidebarTitle: "Validators"
+description: "The v namespace provides typed validators for every primitive and composite type. Use them in defineTable(), query(), mutation(), and action() for full runtime type safety."
+---
+
+The `v` namespace, imported from `baseflare/values`, is Baseflare's validator system. Validators serve three roles: they define the shape of table fields in `defineTable()`, they declare the argument contracts of server functions in `query()`, `mutation()`, and `action()`, and they specify the expected return value shape via the `returns` option. At runtime, every value that enters or leaves a Baseflare function is passed through its validator and rejected with a typed `ValidationError` if it does not conform.
+
+## Primitive Validators
+
+| Validator | TypeScript Type | Notes |
+|---|---|---|
+| `v.string()` | `string` | Any UTF-8 string |
+| `v.number()` | `number` | Must be finite and non-NaN |
+| `v.boolean()` | `boolean` | `true` or `false` |
+| `v.bytes()` | `Uint8Array` | Raw binary data |
+| `v.null()` | `null` | Exactly `null` |
+| `v.any()` | `unknown` | Passes through any value without validation |
+
+## Reference Validators
+
+`v.id(tableName)` validates that a value is a well-formed UUIDv7 string. The TypeScript type is the branded `Id<'tableName'>`, which prevents accidental cross-table ID usage at compile time.
+
+```typescript
+v.id('todos')   // Id<'todos'>
+v.id('users')   // Id<'users'>
+```
+
+The validator checks both UUIDv7 format and that the embedded timestamp is extractable. It does **not** perform a database round-trip to confirm the document exists.
+
+## Composite Validators
+
+| Validator | TypeScript Type | Notes |
+|---|---|---|
+| `v.array(inner)` | `T[]` | Validates every element with `inner` |
+| `v.object(shape)` | Typed object | Rejects unknown keys not in `shape` |
+| `v.record(valueValidator)` | `Record<string, T>` | Any string keys, values validated by `valueValidator` |
+| `v.union(...members)` | Union type | Tries each member in order; first match wins |
+| `v.literal(value)` | Exact value | Accepts only that specific string, number, or boolean |
+| `v.enum([...values])` | Union of string literals | Shorthand for a union of string literals |
+| `v.vector({ dimensions })` | `number[]` | Fixed-length array of finite numbers |
+
+`v.object` strictly validates the set of keys — any key present in the input that is not declared in the shape will cause a validation error. `v.record` is the right choice when the key set is dynamic.
+
+`v.union` accepts individual validators as spread arguments:
+
+```typescript
+v.union(v.string(), v.number(), v.null())
+```
+
+`v.vector` requires a `dimensions` option and validates that the array contains exactly that many finite numbers:
+
+```typescript
+v.vector({ dimensions: 1536 })  // OpenAI ada-002 embedding size
+```
+
+## Modifier Methods
+
+Validators expose chainable modifier methods. All modifiers return a new validator — they do not mutate the original.
+
+| Method | Applies To | Effect |
+|---|---|---|
+| `.optional()` | All | Makes the field optional in both input and output (`T \| undefined`) |
+| `.default(value)` | All | Field is optional in input but always present in output (uses `value` when `undefined`) |
+| `.min(n)` | `string`, `number`, `array`, `bytes`, `vector` | Minimum length (for strings/arrays/bytes/vectors) or minimum value (for numbers) |
+| `.max(n)` | `string`, `number`, `array`, `bytes`, `vector` | Maximum length or maximum value |
+| `.searchable()` | All | Marks the field for full-text search indexing (planned) |
+| `.integer()` | `number` only | Value must pass `Number.isSafeInteger` |
+
+```typescript
+v.string().min(1).max(280)          // non-empty string, max 280 chars
+v.number().min(0).integer()         // non-negative safe integer
+v.boolean().default(false)          // optional in input, always present in output
+v.array(v.string()).default([])     // defaults to empty array
+v.string().optional()               // input and output may be undefined
+```
+
+`.default(value)` makes the field optional in the **input** (callers may omit it) but guarantees the field is always present in the **output** with the provided default when omitted. `.optional()` makes the field optional in both input and output, meaning the value may be `undefined` after validation.
+
+<Tip>
+  Validators are composable — chain `.optional()`, `.default()`, `.min()`, `.max()` in any order on supported types. For example, `v.number().integer().min(0).max(100)` is a valid non-negative integer capped at 100.
+</Tip>
+
+## Using Validators in Functions
+
+The same `v` namespace is used for both schema field definitions and server function signatures. Pass a `ValidatorShape` (an object of validators) to `args`, and an optional single validator to `returns`:
+
+```typescript
+import { query } from 'baseflare/server'
+import { v } from 'baseflare/values'
+
+export const getUser = query({
+  args: { id: v.id('users') },
+  returns: v.object({ name: v.string(), email: v.string() }),
+  async handler(ctx, args) {
+    return await ctx.db.get('users', args.id)
+  },
+})
+```
+
+When `returns` is provided, Baseflare validates the handler's return value before sending it to the client. For mutations, if the return value fails validation, the pending writes are not committed. Omitting `returns` bypasses return-value validation — the value is passed through as `unknown`.

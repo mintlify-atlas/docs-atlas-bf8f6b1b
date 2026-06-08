@@ -1,0 +1,86 @@
+---
+title: "Define Your Data Model with Baseflare Schema"
+sidebarTitle: "Schema"
+description: "Use defineSchema() and defineTable() to declare tables, fields, and indexes. Baseflare uses a document model on D1/SQLite with schema validation at write time."
+---
+
+Baseflare uses a document model where each table stores records as JSON in a `_data` column inside a Cloudflare D1 (SQLite) database. Field types are not enforced at the D1 level — instead, Baseflare validates every document against your schema in the Worker at write time, before any data reaches the database. This means you get strong runtime type safety without complex SQL migrations for field-level changes.
+
+## `defineTable(fields)`
+
+`defineTable` creates a table definition from a map of field names to `v.*` validators. Every table must define at least one field. Fields are validated by name — they must be valid identifiers and cannot start with `_`.
+
+```typescript
+import { defineSchema, defineTable } from 'baseflare/server'
+import { v } from 'baseflare/values'
+
+export const schema = defineSchema({
+  todos: defineTable({
+    ownerId: v.string(),
+    text: v.string().min(1).max(280),
+    completed: v.boolean().default(false),
+    tags: v.array(v.string()).default([]),
+  }).index('by_owner', ['ownerId']),
+})
+```
+
+The returned builder can be chained with `.index()` calls before being passed to `defineSchema`.
+
+## `defineSchema(tables)`
+
+`defineSchema` accepts an object mapping table names to table builders created with `defineTable`. At least one table is required. Table names must be valid identifiers and cannot start with `_`.
+
+Once you have a schema, call `schema.toCreateStatements()` to get the SQL DDL needed to provision your D1 database. The returned array contains one `CREATE TABLE` statement per table followed by one `CREATE INDEX` statement per index.
+
+```sql
+CREATE TABLE todos (_id TEXT PRIMARY KEY, _data TEXT NOT NULL, _rev INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX todos_by_owner ON todos (json_extract(_data, '$.ownerId'));
+```
+
+Every table gets three framework-managed columns:
+- `_id` — a UUIDv7 primary key that encodes the creation timestamp
+- `_data` — the full document stored as a JSON string
+- `_rev` — an integer revision counter used for optimistic concurrency
+
+Your field definitions live inside `_data`. Indexes are expressed as `json_extract` expressions over that column.
+
+## Indexes
+
+Add indexes to a table builder with `.index(name, fields, options?)`. Index names must be valid identifiers. All fields listed in the index must be defined on the table.
+
+```typescript
+defineTable({ orgId: v.string(), text: v.string() })
+  .index('by_org', ['orgId'], { partition: true })
+```
+
+**Partition indexes** are a special category used by the Baseflare runtime to scope optimistic concurrency tracking. Mark an index as the partition index by passing `{ partition: true }` in the options object:
+
+- If a table has exactly one index, it automatically becomes the partition index (you do not need to specify `{ partition: true }` explicitly).
+- If a table has multiple indexes, you must mark exactly one with `{ partition: true }`, or opt all indexes out with `{ partition: false }`.
+
+Partition indexes must use only scalar field types: `string`, `number`, `boolean`, `id`, `literal`, or `enum`.
+
+## Reserved Names
+
+Both table names and field names must follow identifier rules — they must start with a letter and contain only letters, numbers, and underscores.
+
+<Note>
+  Field names and table names **cannot start with `_`**. Names beginning with `_` are reserved for framework-managed fields (`_id`, `_data`, `_rev`, `_createdAt`). The prefix `_bf_` is additionally reserved for internal Baseflare system tables such as `_bf_table_versions` and `_bf_partition_versions`.
+</Note>
+
+The field names `AND`, `OR`, and `NOT` are also reserved — they are used as logical operators in the query filter API.
+
+## Schema Evolution
+
+Baseflare's document model means that **adding, removing, or renaming fields requires no migration**. Because all field data lives in the `_data` JSON column, changing your TypeScript field definitions takes effect immediately at validation time without altering the database structure.
+
+Only two kinds of changes produce DDL:
+
+1. **Adding a new table** — generates a `CREATE TABLE` statement.
+2. **Adding or removing an index** — generates a `CREATE INDEX` or notes the removed index in the schema diff.
+
+<Note>
+  Tables removed from your schema but that still contain data become **read-only orphaned tables**. Baseflare will never automatically drop a table with data. Orphaned tables continue to be readable but reject all writes until you explicitly delete them via the dashboard.
+</Note>
+
+Call `schema.toCreateStatements()` to get the full set of DDL statements needed for a fresh deployment. For incremental updates, the schema diff utilities compute the minimal set of statements to bring an existing database in sync with the current schema.

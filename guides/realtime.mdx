@@ -1,0 +1,137 @@
+---
+title: "Real-Time Subscriptions with Durable Objects"
+sidebarTitle: "Real-Time"
+description: "Baseflare uses Cloudflare Durable Objects and WebSockets to push query result updates to subscribed clients. Learn the planned real-time architecture and subscription API."
+---
+
+Baseflare is designed from the ground up to support real-time reactive data. When this feature lands, clients will be able to subscribe to any query and automatically receive updated results whenever the underlying data changes — no polling, no manual cache invalidation, no client-side diffing. Mutations write data and fan out change notifications in the same D1 commit, so subscribers always see a consistent view of the world.
+
+<Note>
+  Real-time subscriptions are a **planned feature** currently in active development (Phase 3 of the implementation roadmap). The architecture described on this page reflects the intended design and is not yet available in any released version of Baseflare.
+</Note>
+
+## Architecture Overview
+
+Baseflare's real-time engine is built entirely on Cloudflare Durable Objects and the WebSocket Hibernation API. There are two distinct Durable Object roles that divide the work cleanly between connection management and subscription evaluation.
+
+**`RealtimeConnectionDO`** is responsible for everything client-facing. Each instance holds a set of live WebSocket connections using the Hibernation API, which means connections can survive DO evictions without dropping clients. It tracks per-client and per-session delivery state, manages reconnection, and bridges outbound result pushes from the subscription layer to the correct WebSocket connections. Connection DO instances shard by client/session ID so connection load spreads evenly across the fleet.
+
+**`RealtimeSubscriptionDO`** owns the subscription logic. It maintains the full registry of active subscriptions including their query arguments, last-delivered version, table dependencies, and partition dependencies. When data changes, this DO re-runs affected queries against D1, compares results to the previously delivered version, and batches changed results back to the connection DOs for delivery. Subscription DO instances shard by data partition so subscribers to the same data are colocated and a single hot write invalidates only the subscribers that care about it.
+
+The mutation flow ties both DOs together through D1. When a mutation executes:
+
+1. The Worker writes document changes **and** compact realtime outbox events in the same D1 commit. The outbox events record which tables changed and which partition values a document entered or left.
+2. The Worker sends a `notify(eventId)` to affected `RealtimeSubscriptionDO` instances as the fast path.
+3. If a notification is missed (DO eviction, network hiccup), the subscription DO catches up from the D1 outbox on its next wake-up.
+4. The subscription DO re-runs affected queries, detects changed results, and dispatches them to the appropriate `RealtimeConnectionDO` instances.
+5. Connection DOs deliver updated results to clients over WebSocket.
+
+This design means real-time delivery is eventually consistent with mutations and recoverable from any transient failure — no real-time event is ever silently lost.
+
+## WebSocket Protocol
+
+Clients connect to the Worker at `GET /api/subscribe` and receive a WebSocket upgrade. All messages in both directions are JSON. The message shapes are defined in `baseflare/values` and shared between the server and client SDK.
+
+```typescript
+// Client sends to subscribe to a query
+{ type: 'subscribe', query: 'listTodos', args: { ownerId: 'user_123' }, subscriptionId: 'sub_1' }
+
+// Client sends to unsubscribe
+{ type: 'unsubscribe', subscriptionId: 'sub_1' }
+
+// Server sends updated results whenever the query result changes
+{ type: 'result', subscriptionId: 'sub_1', data: [...] }
+
+// Server sends a periodic heartbeat to keep the connection alive
+{ type: 'heartbeat', timestamp: 1709000000 }
+```
+
+Each subscription is identified by a `subscriptionId` chosen by the client. This allows multiple independent subscriptions to exist on a single WebSocket connection. When a mutation changes data that a subscription depends on, the server sends a `result` event only for the affected subscriptions — not for all active subscriptions on that connection.
+
+The full set of wire types are defined in `packages/baseflare/src/values/rpc.ts`:
+
+```typescript
+interface WSSubscribeMessage {
+  type: 'subscribe'
+  query: string
+  args: Record<string, unknown>
+  subscriptionId: string
+}
+
+interface WSUnsubscribeMessage {
+  type: 'unsubscribe'
+  subscriptionId: string
+}
+
+interface WSResultEvent {
+  type: 'result'
+  subscriptionId: string
+  data: unknown
+}
+
+interface WSErrorEvent {
+  type: 'error'
+  subscriptionId: string
+  message: string
+}
+
+interface WSHeartbeatEvent {
+  type: 'heartbeat'
+  timestamp: number
+}
+```
+
+## Planned Client API
+
+The `@baseflare/react` package (also planned) will expose a `useQuery` hook that manages the full subscription lifecycle transparently. Calling `useQuery` subscribes on mount and unsubscribes when the component unmounts. The hook returns `undefined` while the first result is loading, then stays reactive for the lifetime of the component.
+
+```typescript
+import { useQuery, useMutation } from '@baseflare/react'
+import { api } from '../baseflare/_generated/api'
+
+function TodoList() {
+  // Subscribes on mount, receives live updates, unsubscribes on unmount
+  const todos = useQuery(api.todos.listTodos, { ownerId: currentUserId })
+  const createTodo = useMutation(api.todos.createTodo)
+
+  return (
+    <ul>
+      {todos?.map(todo => <li key={todo._id}>{todo.text}</li>)}
+    </ul>
+  )
+}
+```
+
+Under the hood `useQuery` calls `client.subscribe()` from `baseflare/client`, which manages the WebSocket connection, sends the subscribe message, and calls the provided callback whenever a `result` event arrives for that subscription ID. The connection manager handles auto-reconnect with exponential backoff and restores active subscriptions after reconnection.
+
+## Dependency Tracking
+
+One of the more subtle aspects of the real-time engine is knowing which subscriptions to invalidate when a mutation commits. Baseflare tracks query-to-table dependencies at **runtime**, not through static analysis of function source code.
+
+When a query handler executes inside `RealtimeSubscriptionDO`, `ctx.db` is wrapped with a tracking proxy. Every table access — whether through `ctx.db.query('todos')`, `ctx.db.get('users', id)`, a helper function, an imported utility, or a nested `ctx.runQuery()` call — is recorded into a `Set<string>`. After the handler completes, that set becomes the subscription's dependency list and is stored alongside the subscription registration.
+
+The dependency set is recaptured on every re-evaluation, not just the first run. This matters because a query might access different tables depending on its arguments or the current state of the data. The subscription DO updates its dependency indexes accordingly after each re-evaluation, so invalidation always reflects the most recent execution path.
+
+Subscriptions to queries that touch a specific partition route to data-local subscription DO instances. Subscriptions that span multiple partitions or that have no partition alignment route to table-level or global subscription DO instances, which are correct but use stronger debounce to avoid flooding D1 with re-evaluations on every write.
+
+## What's Needed for This Feature
+
+The following components need to be built before real-time subscriptions can ship. Each piece is tracked separately on the Phase 3 roadmap.
+
+<CardGroup cols={2}>
+  <Card title="WebSocket Endpoint" icon="plug">
+    `GET /api/subscribe` on the environment Worker, handling the HTTP upgrade and routing new connections to a `RealtimeConnectionDO` instance.
+  </Card>
+  <Card title="RealtimeConnectionDO" icon="wifi">
+    Durable Object that holds WebSocket connections via the Hibernation API, tracks per-client delivery state, and forwards results from the subscription layer to the correct clients.
+  </Card>
+  <Card title="RealtimeSubscriptionDO" icon="database">
+    Durable Object that owns subscription registration, dependency tracking, query re-evaluation against D1, and batched fanout to connection DOs.
+  </Card>
+  <Card title="D1 Realtime Outbox" icon="table">
+    Append-only outbox table written in the same D1 commit as mutation data. Records changed tables and partition values so subscription DOs can catch up after missed notifications.
+  </Card>
+  <Card title="Client Subscription Manager" icon="code">
+    The `baseflare/client` WebSocket connection manager and subscription state tracker, plus the `useQuery` hook in `@baseflare/react` that exposes the subscription lifecycle to React components.
+  </Card>
+</CardGroup>

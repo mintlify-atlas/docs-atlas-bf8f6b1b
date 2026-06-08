@@ -1,0 +1,201 @@
+---
+title: "Deploy Baseflare to Cloudflare Workers"
+sidebarTitle: "Deployment"
+description: "Learn how Baseflare deploys to Cloudflare Workers, how createWorker() assembles the Worker entry point, and what happens during schema application on deploy."
+---
+
+A Baseflare backend is a standard Cloudflare Worker. `createWorker(manifest)` from `baseflare/server` produces a Cloudflare `ExportedHandler` — the Worker's default export. The deploy model has no management infrastructure sitting between you and Cloudflare: the CLI talks directly to the Cloudflare API to provision resources, bundle your code, apply schema changes to D1, and upload the Worker script. Once deployed, requests hit your Worker directly with zero intermediary hops.
+
+---
+
+## `createWorker(manifest)`
+
+`createWorker` accepts a `BaseflareManifest` and returns the `fetch` handler object that Cloudflare expects as the Worker's default export. The CLI generates the Worker entry point automatically on deploy, but the pattern looks like this:
+
+```typescript
+import { createWorker } from 'baseflare/server'
+import { schema } from './schema'
+import { rules } from './rules'
+import * as queries from './queries'
+import * as mutations from './mutations'
+import http from './http'
+
+export default createWorker({
+  schema,
+  rules,
+  functions: { ...queries, ...mutations },
+  http, // optional
+})
+```
+
+The manifest object (`BaseflareManifest`) accepts the following fields:
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `schema` | `Schema` | ✅ | The schema produced by `defineSchema()`. Used for write-time validation and schema application on deploy. |
+| `rules` | `Rules` | — | Permissions produced by `defineRules()`. Deny-by-default: if omitted, all access is denied. |
+| `queryEntries` | `BaseflareFunctionEntry[]` | — | Registered public query definitions, indexed by canonical name. |
+| `mutationEntries` | `BaseflareFunctionEntry[]` | — | Registered public mutation definitions. |
+| `actionEntries` | `BaseflareFunctionEntry[]` | — | Registered public action definitions. |
+| `internalQueryEntries` | `BaseflareFunctionEntry[]` | — | Internal queries, not exposed via RPC. |
+| `internalMutationEntries` | `BaseflareFunctionEntry[]` | — | Internal mutations, not exposed via RPC. |
+| `internalActionEntries` | `BaseflareFunctionEntry[]` | — | Internal actions, not exposed via RPC. |
+| `http` | `HttpRouter` | — | Optional `HttpRouter` instance from `httpRouter()` for custom HTTP routes. |
+| `config` | `BaseflareConfig` | — | Optional config from `defineConfig()`. |
+
+Each function entry carries a canonical name derived from its module path and export name (for example `queries:listTodos`). Duplicate canonical names within the same manifest cause `buildBaseflareManifest` to throw at startup.
+
+---
+
+## How Requests Are Routed
+
+When a request arrives, `createWorker` evaluates routes in a fixed priority order and returns the first match. If no route matches, a `NOT_FOUND` error is returned.
+
+<Steps>
+  <Step title="POST /api/query/:name">
+    Runs the named public query. The route name is URL-decoded from the path segment after `/api/query/`. Non-POST requests to a query path return a `VALIDATION_ERROR` with the message `"Query RPC requests must use POST"`.
+  </Step>
+  <Step title="POST /api/mutation/:name">
+    Runs the named public mutation. Non-POST requests to a mutation path return a `VALIDATION_ERROR` with the message `"Mutation RPC requests must use POST"`.
+  </Step>
+  <Step title="POST /api/action/:name">
+    Runs the named public action. Non-POST requests to an action path return a `VALIDATION_ERROR` with the message `"Action RPC requests must use POST"`.
+  </Step>
+  <Step title="Custom HTTP routes">
+    Routes registered on the `HttpRouter` via `http.route()` or `http.routeWithPrefix()`. The router matches by HTTP method and exact path (or prefix for `routeWithPrefix`).
+  </Step>
+  <Step title="404">
+    If no route matches, a `NOT_FOUND` runtime error is returned: `Route "METHOD /path" was not found`.
+  </Step>
+</Steps>
+
+Internal functions (`internalQuery`, `internalMutation`, `internalAction`) are **not** reachable over RPC. They can only be called server-side via `ctx.runQuery()`, `ctx.runMutation()`, or `ctx.runAction()`.
+
+---
+
+## RPC Request Format
+
+All RPC calls use `POST` with a JSON body shaped exactly as `{ "args": ... }`. The body must not be empty, must be valid JSON, and must contain only the `args` key. Any deviation returns a `VALIDATION_ERROR`.
+
+<CodeGroup>
+```bash Call a query
+curl -X POST https://your-worker.workers.dev/api/query/listTodos \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer <token>' \
+  -d '{"args": {"ownerId": "user_123"}}'
+```
+
+```bash Call a mutation
+curl -X POST https://your-worker.workers.dev/api/mutation/createTodo \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer <token>' \
+  -d '{"args": {"ownerId": "user_123", "text": "Buy milk"}}'
+```
+
+```bash Call an action
+curl -X POST https://your-worker.workers.dev/api/action/importTodo \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer <token>' \
+  -d '{"args": {"ownerId": "user_123", "sourceUrl": "https://example.com/todo.txt"}}'
+```
+</CodeGroup>
+
+RPC request bodies are limited to 1 MB. Requests exceeding this limit return a `VALIDATION_ERROR`.
+
+---
+
+## RPC Response Format
+
+All RPC responses are JSON. A successful call wraps the return value in a `result` envelope. An error wraps a structured payload in an `error` envelope.
+
+<CodeGroup>
+```json Success
+{
+  "result": {
+    "_id": "019078e5-d29f-7b00-8000-1a2b3c4d5e6f",
+    "text": "Buy milk",
+    "completed": false
+  }
+}
+```
+
+```json Error
+{
+  "error": {
+    "code": "PERMISSION_DENIED",
+    "message": "Permission denied"
+  }
+}
+```
+
+```json Application error (BaseflareError)
+{
+  "error": {
+    "code": "OUT_OF_STOCK",
+    "data": { "remaining": 0 },
+    "message": "Out of stock"
+  }
+}
+```
+</CodeGroup>
+
+The HTTP status code matches the error code: `400` for `VALIDATION_ERROR`, `403` for `PERMISSION_DENIED`, `404` for `NOT_FOUND`, `409` for `CONFLICT`, `501` for `NOT_IMPLEMENTED`, and `500` for all other errors. `INTERNAL_ERROR` responses always use the generic message `"Internal error"` — details are logged internally and never sent to the client.
+
+---
+
+## Schema Application
+
+`createWorker` does **not** run DDL during requests. Schema application — `CREATE TABLE`, `CREATE INDEX`, and related D1 statements — is a deploy-time step run by the CLI against your D1 database before traffic is routed to the new Worker version.
+
+The schema diffing rules are:
+
+| Change | Behaviour |
+|---|---|
+| Add field | No-op — JSON document model, validation at write time |
+| Remove or rename field | No-op — old documents return the field on read until rewritten |
+| Change field type | No-op — validation catches mismatches at write time |
+| Add table | Safe — `CREATE TABLE` applied automatically |
+| Remove table from schema | Orphan — table kept read-only, dashboard shows warning with row count |
+| Add or drop index | Safe — `CREATE INDEX` / `DROP INDEX` applied automatically |
+
+This means a `baseflare deploy` never destroys data. Orphaned tables can be deleted manually via the dashboard after you have confirmed the data is no longer needed.
+
+---
+
+## Worker Bindings
+
+The Worker expects a D1 database bound as `APP_DB` in the Cloudflare runtime environment. In CLI-managed deployments this binding is configured automatically. For manual deployments using `wrangler`, add the binding to your `wrangler.toml`:
+
+```toml
+# wrangler.toml (manual deploy only — CLI manages this automatically)
+[[d1_databases]]
+binding = 'APP_DB'
+database_name = 'my-app-production-db'
+database_id = '<your-d1-id>'
+```
+
+The binding name `APP_DB` is fixed — it is the identifier the runtime reads from `env.APP_DB` on every request. Future phases add additional bindings for R2 (`FILES`), Durable Objects (`REALTIME_CONNECTIONS`, `REALTIME_SUBSCRIPTIONS`, `SCHEDULER`), and Vectorize (`VECTORS`), all managed automatically by the CLI.
+
+<Note>
+  The full CLI deploy workflow — auto-provisioning Cloudflare resources, applying schema changes, bundling the Worker, and uploading via the CF API — is in active development as part of Phase 4. Currently, manual deployment via `wrangler` with the D1 binding configured above is supported.
+</Note>
+
+---
+
+## Error Codes
+
+The Baseflare runtime uses a fixed set of error codes in `error.code` responses. These codes are sourced from the `ErrorCode` constant in `baseflare/values`:
+
+| Code | HTTP Status | When it occurs |
+|---|---|---|
+| `VALIDATION_ERROR` | 400 | Malformed request body, invalid arguments, failed schema or return validation |
+| `UNAUTHORIZED` | 401 | Missing or invalid auth token |
+| `PERMISSION_DENIED` | 403 | Auth token present but rules deny the operation |
+| `NOT_FOUND` | 404 | Named function or route does not exist |
+| `CONFLICT` | 409 | Optimistic concurrency conflict after retry exhaustion |
+| `MALFORMED_DOCUMENT` | 500 | A stored document cannot be deserialized from D1 |
+| `DATABASE_ERROR` | 500 | D1 returned an error or unexpected result |
+| `NOT_IMPLEMENTED` | 501 | Feature not yet implemented in the current runtime |
+| `INTERNAL_ERROR` | 500 | Unexpected runtime error — details logged internally, message sanitized |
+
+Application errors thrown by developer code using `new BaseflareError(data)` propagate to the client with their structured `data` payload intact. The `code` field is read from `data.code` if present, otherwise it defaults to `INTERNAL_ERROR`.

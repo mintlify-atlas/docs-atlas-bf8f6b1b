@@ -1,0 +1,218 @@
+---
+title: "Configure Baseflare with defineConfig"
+sidebarTitle: "Configuration"
+description: "Use defineConfig() in baseflare.config.ts to set the project name, functions directory, CORS policy, request limits, and Cloudflare Worker settings."
+---
+
+`baseflare.config.ts` in your project root is the committed configuration file for your Baseflare project. It uses `defineConfig()` from `baseflare/server` to declare settings that the CLI reads on every `deploy`, `dev`, and `generate` operation. Because this file is always TypeScript, you get autocompletion and validation at both edit time and runtime — `defineConfig()` validates every option eagerly and throws a descriptive error if anything is misconfigured.
+
+## Full Configuration Reference
+
+The example below shows every available option with inline documentation:
+
+```typescript
+import { defineConfig } from 'baseflare/server'
+
+export default defineConfig({
+  // Required: project name slug (used to name Cloudflare resources)
+  project: 'my-app',
+
+  // Functions directory (default: 'baseflare')
+  // Supports any relative path — useful for monorepos
+  functions: 'baseflare',
+
+  // Packages to exclude from Worker bundling (optional)
+  // Use for packages with native bindings that break when bundled
+  external: [],
+
+  // CORS configuration (optional)
+  cors: {
+    origins: ['https://myapp.com', 'http://localhost:5173'],
+    maxAge: 86400, // preflight cache in seconds
+  },
+
+  // Request limits (optional)
+  limits: {
+    maxQueryResults: 1000,  // safety cap on unbounded .collect()
+    maxUploadSize: '10mb',  // file upload size limit
+  },
+
+  // Middleware (optional — planned for Phase 7)
+  middleware: [],
+
+  // Cloudflare Worker settings (optional)
+  worker: {
+    compatibilityDate: '2026-04-08',
+    compatibilityFlags: [], // nodejs_compat always included
+  },
+})
+```
+
+<Note>
+  `baseflare.config.ts` is committed to version control. Never put credentials, API tokens, or secrets in it. Use Worker Secrets (managed via `baseflare secrets set`) or environment variables for sensitive values.
+</Note>
+
+---
+
+## `project`
+
+**Required.** A non-empty string slug that identifies your project. The CLI uses this value to name all Cloudflare resources it provisions:
+
+- Worker: `bf-{project}-{env}`
+- D1 database: `bf-{project}-{env}-db`
+- R2 bucket: `bf-{project}-{env}-files`
+
+```typescript
+project: 'my-app',
+```
+
+The value must be a non-empty string after trimming whitespace. Attempting to pass an empty string or omit `project` entirely causes `defineConfig()` to throw immediately:
+
+```
+Error: config.project must be a non-empty string
+```
+
+Choose a stable, URL-safe slug. Changing it after your first deploy will not rename existing Cloudflare resources — the CLI tracks resources in `.baseflare/project.json` using their IDs.
+
+---
+
+## `functions`
+
+**Optional.** The relative path to your functions directory. Defaults to `'baseflare'`, which resolves to a `baseflare/` folder in your project root.
+
+```typescript
+functions: 'baseflare',
+```
+
+The CLI scans this directory for `schema.ts`, `rules.ts`, query/mutation/action modules, and the HTTP router. Nested folders within the functions directory become namespaces in the generated `_generated/api.ts` object:
+
+```
+baseflare/
+  todos.ts          → api.todos.list, api.todos.create
+  billing/
+    invoices.ts     → api.billing.invoices.list
+    payments.ts     → api.billing.payments.charge
+```
+
+For monorepos or non-standard layouts, point `functions` at any relative path:
+
+```typescript
+functions: 'packages/backend/src/functions',
+```
+
+The value must be a non-empty string. An empty string or only whitespace causes `defineConfig()` to throw.
+
+---
+
+## `cors`
+
+**Optional.** CORS policy applied to all RPC and HTTP routes served by the Worker. If omitted, no CORS headers are added (browsers calling the Worker from a different origin will be blocked by default browser policy).
+
+```typescript
+cors: {
+  origins: ['https://myapp.com', 'http://localhost:5173'],
+  maxAge: 86400,
+},
+```
+
+### `cors.origins`
+
+An array of allowed origin strings. Each entry must be a non-empty string — empty strings cause `defineConfig()` to throw:
+
+```
+Error: cors.origins entries must be non-empty strings
+```
+
+For local development you will typically include `'http://localhost:5173'` or whichever port your frontend dev server uses alongside your production domain.
+
+### `cors.maxAge`
+
+**Optional.** Integer number of seconds that the browser may cache a preflight (`OPTIONS`) response. Must be a non-negative integer:
+
+```
+Error: cors.maxAge must be a non-negative integer
+```
+
+A value of `86400` (24 hours) is a reasonable default for production. Setting it to `0` disables preflight caching.
+
+---
+
+## `limits`
+
+**Optional.** Runtime safety limits applied during request execution.
+
+```typescript
+limits: {
+  maxQueryResults: 1000,
+  maxUploadSize: '10mb',
+},
+```
+
+### `limits.maxQueryResults`
+
+**Optional.** A positive integer cap on the number of documents an unbounded `.collect()` call may return in a single query. Must be a positive integer:
+
+```
+Error: limits.maxQueryResults must be a positive integer
+```
+
+This acts as a safety net against accidentally loading the entire database into memory. Applications that need larger result sets should use `.paginate()` instead of raising this limit arbitrarily.
+
+### `limits.maxUploadSize`
+
+**Optional.** A non-empty string describing the maximum allowed file upload size, for example `'10mb'`, `'5mb'`, or `'50mb'`. The value must be a non-empty string:
+
+```
+Error: limits.maxUploadSize must be a non-empty string
+```
+
+<Tip>
+  `external` is an escape hatch for packages with native bindings (such as sharp, better-sqlite3, or packages with dynamic requires) that cannot be bundled by the Worker bundler. Most applications will never need it. If the bundler produces an error mentioning a package with native code, add that package name to `external`.
+</Tip>
+
+---
+
+## `worker`
+
+**Optional.** Settings passed to the Cloudflare Workers API on every deploy.
+
+```typescript
+worker: {
+  compatibilityDate: '2026-04-08',
+  compatibilityFlags: [],
+},
+```
+
+### `worker.compatibilityDate`
+
+**Optional.** A date string in `YYYY-MM-DD` format that pins which version of the Cloudflare Workers runtime your Worker targets. Cloudflare uses this date to gate breaking runtime changes:
+
+```
+Error: worker.compatibilityDate must use the YYYY-MM-DD format
+```
+
+If omitted, the CLI uses its own default. It is good practice to set this explicitly and update it periodically to receive runtime improvements.
+
+### `worker.compatibilityFlags`
+
+**Optional.** An array of non-empty strings for additional Cloudflare compatibility flags. Each entry must be a non-empty string:
+
+```
+Error: worker.compatibilityFlags entries must be non-empty strings
+```
+
+<Note>
+  `nodejs_compat` is **always injected automatically** by the CLI — it is required for `process.env`, npm package support, and auth integrations. You do not need to add it yourself. Any flags you list in `compatibilityFlags` are appended on top of `nodejs_compat`.
+</Note>
+
+---
+
+## Unknown Options
+
+`defineConfig()` performs strict key validation. Passing an unrecognised top-level key (or an unrecognised key inside `cors`, `limits`, or `worker`) causes an immediate error:
+
+```
+Error: Unknown config option "invalid"
+```
+
+This prevents typos from silently being ignored. The valid top-level keys are: `project`, `functions`, `external`, `cors`, `limits`, `middleware`, `worker`.

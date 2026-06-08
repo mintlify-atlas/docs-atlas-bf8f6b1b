@@ -1,0 +1,129 @@
+---
+title: "Schedule Background Jobs with SchedulerDO"
+sidebarTitle: "Scheduler"
+description: "Baseflare plans to provide background job scheduling via a Durable Object with the Cloudflare Alarms API — schedule functions to run after a delay or at an absolute time."
+---
+
+Background job scheduling is a planned feature for Baseflare that will be delivered in Phase 7b of the implementation roadmap. When implemented, `ctx.scheduler` will be available inside mutations and actions, allowing you to schedule any internal function to run after a delay or at a specific future timestamp. Jobs are stored durably in a `SchedulerDO` Durable Object, executed via the Cloudflare Alarms API, and tracked through their full lifecycle from `pending` to `succeeded` or `failed`.
+
+<Note>
+  The scheduler is a **planned feature** in active development and is not yet available in any released version of Baseflare. The API and architecture described on this page reflect the intended design from the Phase 7b implementation plan.
+</Note>
+
+## `ctx.scheduler` API
+
+`ctx.scheduler` exposes three methods. All three are available in both mutations and actions. Scheduling a job returns a job ID string that can be stored in your application data and used later to cancel the job if needed.
+
+```typescript
+// Run a function after a delay in milliseconds (returns job ID)
+const jobId = await ctx.scheduler.runAfter(5000, internal.emails.send, {
+  to: 'user@example.com',
+  subject: 'Welcome!',
+})
+
+// Run at an absolute timestamp — no time limit, can schedule weeks or months ahead
+await ctx.scheduler.runAt(Date.now() + 30 * 86400000, internal.reports.generate, {})
+
+// Cancel a scheduled job before it executes
+await ctx.scheduler.cancel(jobId)
+```
+
+The `runAfter` and `runAt` methods accept three arguments: the delay in milliseconds or an absolute Unix timestamp, a typed reference to an internal function, and the arguments to pass to that function. The `Scheduler` interface is already defined in `packages/baseflare/src/server/functions/types.ts`:
+
+```typescript
+interface Scheduler {
+  runAfter(
+    delayMs: number,
+    ref: FunctionReference<unknown, unknown>,
+    args: unknown
+  ): Promise<string>
+
+  runAt(
+    timestamp: number,
+    ref: FunctionReference<unknown, unknown>,
+    args: unknown
+  ): Promise<string>
+}
+```
+
+The `cancel` method (not yet in the interface) will be added as part of Phase 7b: `ctx.scheduler.cancel(jobId): Promise<void>`.
+
+## How It Works
+
+All scheduled job state lives inside `SchedulerDO`, a Durable Object that has its own internal SQLite database separate from your application D1. This means job history never competes with application queries and the scheduler can be independently inspected from the dashboard.
+
+The execution lifecycle works as follows:
+
+1. When `ctx.scheduler.runAfter()` or `ctx.scheduler.runAt()` is called, the Worker sends the job to `SchedulerDO` via a DO stub call.
+2. The DO inserts the job into its internal SQLite with status `pending` and recalculates the next alarm time: `SELECT MIN(execute_at) FROM jobs WHERE status = 'pending'`.
+3. The DO sets or updates a Cloudflare Alarm for that timestamp. The Alarms API has **no time limit** — a job scheduled 30 days from now will fire correctly.
+4. When the alarm fires, the DO queries all jobs where `execute_at <= now AND status = 'pending'`, sets each to `running`, and calls the environment Worker's internal function endpoint for each job.
+5. The Worker executes the function handler and returns the result to the DO.
+6. The DO updates the job record to `succeeded` (with a `completed_at` timestamp) or `failed` (with the error message stored).
+7. After processing, the DO recalculates the next alarm for any remaining `pending` jobs.
+
+Cancellation works by sending a cancel request to the DO, which updates the job status to `canceled` and recalculates the next alarm. A canceled job will not execute even if the alarm fires before the status update propagates.
+
+## Job History
+
+Every job is recorded in the `SchedulerDO` internal SQLite with the following structure. The dashboard will be able to query this table to display job history filtered by status, function, or time range.
+
+```typescript
+// Each job has:
+// - id: UUIDv7 string (time-sortable, globally unique)
+// - functionRef: e.g. 'internal.emails.send'
+// - args: JSON-serialized arguments passed to the function
+// - status: 'pending' | 'running' | 'succeeded' | 'failed' | 'canceled'
+// - scheduledAt: when runAfter/runAt was called (the scheduling moment)
+// - executeAt: when the job should execute (scheduledAt + delay)
+// - error: error message string if the job failed, null otherwise
+// - completedAt: when the job finished executing, null if not yet complete
+```
+
+The underlying SQLite schema planned for `SchedulerDO`:
+
+```sql
+CREATE TABLE jobs (
+  id          TEXT    PRIMARY KEY,           -- UUIDv7
+  function_ref TEXT   NOT NULL,              -- e.g. 'internal.emails.send'
+  args        TEXT    NOT NULL,              -- JSON-serialized arguments
+  scheduled_at INTEGER NOT NULL,            -- when runAfter/runAt was called
+  execute_at  INTEGER NOT NULL,             -- when the job should execute
+  status      TEXT    NOT NULL DEFAULT 'pending', -- pending | running | succeeded | failed | canceled
+  error       TEXT,                         -- error message if failed
+  completed_at INTEGER                      -- when the job finished
+);
+```
+
+## Cron Triggers
+
+Recurring jobs are handled separately from the scheduler. Baseflare plans to support recurring jobs through a `defineCrons()` function that maps cron expressions to internal function references. When you deploy, the CLI reads your crons configuration and creates or updates Cloudflare Cron Triggers for the Worker via the Cloudflare API.
+
+```typescript
+// baseflare/crons.ts
+import { defineCrons } from 'baseflare/server'
+import { internal } from './_generated/internal'
+
+export default defineCrons({
+  weeklyReport: {
+    cron: '0 9 * * 1', // every Monday at 9am UTC
+    handler: internal.reports.generateWeekly,
+  },
+})
+```
+
+When a cron trigger fires, Cloudflare invokes the Worker with a `scheduled` event. Baseflare's Worker runtime handles this event, looks up the matching handler from the crons manifest, and executes it. The `defineCrons()` function is planned as part of Phase 7b alongside `ctx.scheduler`.
+
+During local development, `npx baseflare dev` emulates cron triggers by parsing the `defineCrons()` output, using `cron-parser` to calculate next fire times, and calling the Miniflare Worker's `scheduled()` method at the correct intervals.
+
+## No Time Limit
+
+<Tip>
+  Cloudflare Durable Object Alarms have **no time limit** on how far in the future they can be scheduled. Unlike Cron Triggers (which are limited to standard cron expressions and fire at most once per minute), you can schedule a job to run in 30 days, 6 months, or even a year from now and it will fire correctly. The CPU time your Worker uses when executing the scheduled function is still subject to your Cloudflare plan limits (10ms on free, 30s on paid by default), but the scheduling window itself is unbounded.
+</Tip>
+
+## Only Call Internal Functions
+
+<Note>
+  Only `internal.*` functions can be scheduled with `ctx.scheduler.runAfter()` and `ctx.scheduler.runAt()`. Public functions exposed via the `api.*` object are intentionally not schedulable. This prevents the scheduler from becoming a vector for unauthorized execution — if public functions could be scheduled directly, any code with access to `ctx.scheduler` could enqueue calls that normally require client authentication or permission checks. Internal functions are server-only and never exposed through the RPC routing layer.
+</Note>

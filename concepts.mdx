@@ -1,0 +1,193 @@
+---
+title: "Baseflare Core Concepts and Architecture"
+sidebarTitle: "Concepts"
+description: "Understand the document model, function types, permission system, UUIDv7 IDs, and Cloudflare resource mapping that make up the Baseflare architecture."
+---
+
+Building with Baseflare requires three mental models: the **document model** (how data is stored and validated), the **function model** (how server logic is organised into queries, mutations, and actions), and the **permission model** (how access is controlled). Each model is designed to be simple in isolation and composable together. This page walks through all three, plus the Cloudflare resource mapping and subpath import structure that underpin the whole system.
+
+---
+
+## Document Model
+
+Baseflare stores every collection as a D1 (SQLite) table with a small, fixed set of columns managed by the framework. Field definitions in `defineTable` describe the shape of the `_data` JSON blob — they are enforced at write time by the Worker runtime, not at the database level. This means adding, removing, or renaming a field in your schema never requires a database migration. Old documents continue to return fields that have since been removed from the schema until those documents are rewritten.
+
+The raw table structure created by `defineSchema` looks like this:
+
+```sql
+CREATE TABLE todos (
+  _id   TEXT    PRIMARY KEY,
+  _data TEXT    NOT NULL,
+  _rev  INTEGER NOT NULL DEFAULT 0
+);
+```
+
+- **`_id`** — A plain UUIDv7 string. Time-sortable, globally unique, and universally parseable without any custom encoding.
+- **`_data`** — The full document stored as a JSON string: `{"text":"hello","completed":false,"ownerId":"user_123"}`.
+- **`_rev`** — An internal row revision counter used by the runtime's optimistic concurrency control. Never exposed through the document API.
+
+Indexes declared with `.index("name", ["field1", "field2"])` become SQLite expression indexes on `json_extract()` calls, created by the deploy step before the Worker receives traffic:
+
+```sql
+CREATE INDEX todos_by_owner ON todos (json_extract(_data, '$.ownerId'));
+```
+
+The SQLite query planner automatically selects the right index based on the query — you never call `.withIndex()` like in Convex. Define your indexes in the schema and write `.filter()` calls; the database does the rest.
+
+---
+
+## Function Types
+
+Baseflare organises server logic into three function types, each with a distinct responsibility and a matching context object.
+
+| | **query** | **mutation** | **action** |
+|---|---|---|---|
+| **Has `ctx.db`** | ✅ Read-only | ✅ Read + write | ❌ No direct DB access |
+| **Can write** | ❌ No | ✅ Yes | Via `ctx.runMutation()` only |
+| **Auto-retried** | — | ✅ Yes (OCC, if safe) | ❌ No |
+| **Use case** | Fetch and return data | Atomic database writes | Side effects, external APIs, webhooks |
+
+**Queries** read documents and return typed data. They receive a `QueryCtx` with a read-only `ctx.db` and `ctx.auth`. They must not produce side effects.
+
+**Mutations** are the atomic write primitive. The runtime tracks reads and writes, detects conflicts with optimistic concurrency control, and retries the handler when it can do so safely. Mutation handlers must be deterministic and retry-safe — side-effectful work belongs in actions.
+
+**Actions** handle side effects: calling external APIs, sending email, processing webhooks, charging payments. They do not have direct `ctx.db` access. Use `ctx.runQuery()` and `ctx.runMutation()` for database work from within an action. Each `ctx.runMutation()` call is its own transaction, so atomic multi-write workflows should be consolidated into a single mutation.
+
+```typescript
+import { action } from "baseflare/server";
+import { v } from "baseflare/values";
+import { createTodo } from "./mutations";
+
+export const importTodo = action({
+  args: {
+    ownerId: v.string(),
+    sourceUrl: v.string(),
+  },
+  returns: v.string(),
+  async handler(ctx, args) {
+    const response = await fetch(args.sourceUrl);
+    const text = await response.text();
+
+    return await ctx.runMutation(createTodo, {
+      ownerId: args.ownerId,
+      text,
+    });
+  },
+});
+```
+
+There are also **internal** variants of all three types — `internalQuery`, `internalMutation`, and `internalAction` — which can only be called from within the server (via `ctx.runQuery`, `ctx.runMutation`, `ctx.runAction`) and are never exposed through the public RPC API.
+
+---
+
+## UUIDv7 IDs
+
+All Baseflare document IDs are plain [UUIDv7](https://www.rfc-editor.org/rfc/rfc9562) strings — time-sortable, globally unique, and universally parseable without any custom encoding or decoding layer. There is no table-name encoding baked into the ID; every `ctx.db` call takes an explicit table parameter.
+
+The `_createdAt` timestamp is **derived from the ID at read time**. UUIDv7's first 48 bits encode milliseconds since the Unix epoch, so no separate column is needed. The `deserialize()` function computes and injects `_createdAt` automatically on every document read.
+
+The `baseflare/values` subpath exports two ID utilities you can use directly:
+
+```typescript
+import { generateId, getCreatedAtFromId } from "baseflare/values";
+
+const id = generateId();
+// → "019078e5-d29f-7b00-8000-1a2b3c4d5e6f"  (standard UUIDv7)
+
+const createdAt = getCreatedAtFromId(id);
+// → Date object derived from the UUIDv7 timestamp bits
+```
+
+Because UUIDv7 IDs are time-sortable, ordering a query by `_id` is equivalent to ordering by insertion time — a useful property for feeds and paginated lists.
+
+---
+
+## Permissions
+
+Baseflare's permission system is **deny-by-default**. If a table or operation has no rule defined, access is denied entirely — there is no fallback to "allow all". This makes the secure baseline the zero-configuration baseline.
+
+Rules are declared per-table with `defineRules` from `baseflare/server`. Each table can define up to four operations:
+
+| Operation | When it runs | Context provided |
+|---|---|---|
+| `read` | Before a document is returned to the caller | `ctx`, `doc` (the candidate document) |
+| `insert` | Before a new document is written | `ctx`, `value` (the document being inserted) |
+| `update` | Before an existing document is patched or replaced | `ctx`, `existingDoc` (the current document) |
+| `delete` | Before a document is deleted | `ctx`, `existingDoc` (the document to be deleted) |
+
+Every rule is an `async` function returning `boolean`. Returning `false` surfaces a `PERMISSION_DENIED` RPC error to the caller. Throwing an error from a rule propagates as an `INTERNAL_ERROR`.
+
+```typescript
+import { defineRules } from "baseflare/server";
+
+export const rules = defineRules({
+  todos: {
+    read: async ({ ctx, doc }) =>
+      doc.ownerId === (await ctx.auth.getUserIdentity()),
+    insert: async ({ ctx, value }) =>
+      value.ownerId === (await ctx.auth.getUserIdentity()),
+    update: async ({ ctx, existingDoc }) =>
+      existingDoc.ownerId === (await ctx.auth.getUserIdentity()),
+    delete: async ({ ctx, existingDoc }) =>
+      existingDoc.ownerId === (await ctx.auth.getUserIdentity()),
+  },
+});
+```
+
+The permission engine runs on every database operation, including `ctx.db.query().collect()`, `ctx.db.get()`, `ctx.db.insert()`, `ctx.db.patch()`, `ctx.db.replace()`, and `ctx.db.delete()`. Read rules filter results silently — documents that fail the `read` rule are excluded from query results rather than causing an error.
+
+---
+
+## Cloudflare Resource Mapping
+
+Every Baseflare environment maps directly to a set of Cloudflare primitives on your account. There is no hosted control plane or intermediary layer between your Worker and the platform.
+
+<CardGroup cols={2}>
+  <Card title="D1 — Database" icon="database">
+    One D1 SQLite database per environment. Stores all collection tables using
+    the document model (`_id`, `_data`, `_rev`). Includes built-in 30-day Time
+    Travel for point-in-time recovery.
+  </Card>
+  <Card title="R2 — File Storage" icon="folder">
+    One R2 bucket per environment. Zero egress fees, S3-compatible. Used by
+    `ctx.storage` for signed upload URLs and server-side file management.
+    Planned for a future phase.
+  </Card>
+  <Card title="Durable Objects — Real-time & Scheduling" icon="bolt">
+    `RealtimeConnectionDO` holds WebSocket connections via the Hibernation API.
+    `RealtimeSubscriptionDO` tracks query subscriptions and fans out updates.
+    `SchedulerDO` manages delayed and scheduled function execution. Planned
+    for future phases.
+  </Card>
+  <Card title="Vectorize — Vector Search" icon="magnifying-glass">
+    One Vectorize index per environment when `v.vector()` fields are present in
+    the schema. Vectors are stored separately from `_data` JSON and queried
+    via `.vectorSearch()` on the query builder. Planned for a future phase.
+  </Card>
+  <Card title="Workers — Compute" icon="cloud">
+    One Worker script per environment. Deployed via the Cloudflare Workers API.
+    Handles all RPC routing (`/api/query/*`, `/api/mutation/*`,
+    `/api/action/*`), custom HTTP endpoints, WebSocket upgrades, and scheduled
+    events.
+  </Card>
+  <Card title="Worker Secrets — Config" icon="key">
+    Cloudflare-managed encrypted secrets bound to the environment Worker.
+    Accessed via `process.env` in Worker code. Managed via the CLI or the
+    Cloudflare dashboard.
+  </Card>
+</CardGroup>
+
+---
+
+## Subpath Imports
+
+The `baseflare` npm package exposes independent subpath exports so that importing one surface does not pull in the runtime code of another. Each subpath is a distinct entry point with its own `types` and `import` conditions in `package.json`.
+
+| Import | Purpose | Status |
+|---|---|---|
+| `baseflare/values` | Validators (`v.*`), typed errors (`BaseflareError`), RPC shapes, pagination types, and ID utilities (`generateId`, `getCreatedAtFromId`) | ✅ Implemented |
+| `baseflare/server` | Schema (`defineSchema`, `defineTable`), function wrappers (`query`, `mutation`, `action`), permissions (`defineRules`), HTTP router, query builder, serialization, and Worker factory (`createWorker`) | ✅ Implemented |
+| `baseflare/client` | `BaseflareClient` class, WebSocket connection manager, subscription state, optimistic updates, and auth methods | 🔜 Planned |
+| `@baseflare/react` | `BaseflareProvider`, `useQuery`, `useMutation`, `useAction`, `usePaginatedQuery`, `useAuth`, and SSR preloading helpers | 🔜 Planned |
+
+`baseflare/values` is the shared leaf — it has no dependency on `baseflare/server` or `baseflare/client` and can be safely imported in both Worker and browser code.

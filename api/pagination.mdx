@@ -1,0 +1,189 @@
+---
+title: "Pagination Types and Validator — Cursor-Based Pagination"
+sidebarTitle: "Pagination"
+description: "PaginationOptions, PaginationResult, and paginationOptsValidator from baseflare/values enable cursor-based pagination in Baseflare queries."
+---
+
+Baseflare uses cursor-based pagination rather than offset-based pagination. Each page of results includes a `continueCursor` string that encodes the position of the last item returned. To fetch the next page, pass that cursor back as the `cursor` field of your next request. Cursor pagination is stable under concurrent insertions and deletions — items won't be duplicated or skipped between pages the way they can be with `LIMIT`/`OFFSET`. The `paginationOptsValidator` pre-built validator lets you accept pagination options in any query's `args` with a single import and full type safety.
+
+## Import
+
+```typescript
+import {
+  paginationOptsValidator,
+  type PaginationOptions,
+  type PaginationResult,
+} from 'baseflare/values'
+```
+
+---
+
+## `PaginationOptions`
+
+`PaginationOptions` is the input type for pagination arguments. Pass a value of this type to `.paginate()` on a query builder, or use `paginationOptsValidator` to accept it as validated query arguments.
+
+```typescript
+interface PaginationOptions {
+  numItems: number
+  cursor: string | null
+}
+```
+
+<ResponseField name="numItems" type="number">
+  The maximum number of items to return in this page. Must be a positive integer (`>= 1`). The page may contain fewer items than `numItems` if fewer items remain, including on the final page.
+</ResponseField>
+
+<ResponseField name="cursor" type="string | null">
+  The `continueCursor` value from the previous page's `PaginationResult`. Pass `null` to request the first page.
+</ResponseField>
+
+---
+
+## `PaginationResult<T>`
+
+`PaginationResult<T>` is the return type of `.paginate()` calls. Your query handler returns this type directly to the client.
+
+```typescript
+interface PaginationResult<TValue> {
+  page: TValue[]
+  isDone: boolean
+  continueCursor: string
+}
+```
+
+<ResponseField name="page" type="T[]">
+  The array of documents in this page. The element type `T` is the document type for the queried table.
+</ResponseField>
+
+<ResponseField name="isDone" type="boolean">
+  `true` when this is the final page — there are no more items after those in `page`. When `isDone` is `true`, subsequent requests with `continueCursor` will return an empty `page`.
+</ResponseField>
+
+<ResponseField name="continueCursor" type="string">
+  An opaque string encoding the pagination position after the last item in `page`. Pass this as `cursor` in the next request to fetch the following page.
+</ResponseField>
+
+---
+
+## `paginationOptsValidator`
+
+`paginationOptsValidator` is a pre-built `v.object()` validator for `PaginationOptions`. Use it directly as a value in your query's `args` shape — no need to construct the validator manually.
+
+**Definition (from source):**
+
+```typescript
+const paginationOptsValidator = v.object({
+  numItems: v.number().integer().min(1),
+  cursor: v.union(v.string(), v.null()).default(null),
+})
+```
+
+The `cursor` field defaults to `null`, so clients can omit it entirely on the first page request.
+
+**Usage in a query:**
+
+```typescript
+import { query } from 'baseflare/server'
+import { v, paginationOptsValidator } from 'baseflare/values'
+
+export const paginatedTodos = query({
+  args: {
+    ownerId: v.string(),
+    opts: paginationOptsValidator,
+  },
+  async handler(ctx, args) {
+    return await ctx.db
+      .query('todos')
+      .filter({ ownerId: args.ownerId })
+      .order('_createdAt', 'desc')
+      .paginate(args.opts)
+  },
+})
+// Returns: PaginationResult<Doc<'todos'>>
+```
+
+---
+
+## Implementing Pagination on the Client
+
+Use any HTTP client to call paginated queries. Start with `cursor: null` for the first page, then thread `continueCursor` through subsequent requests until `isDone` is `true`.
+
+<CodeGroup>
+
+```bash First page
+curl -X POST /api/query/paginatedTodos \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "args": {
+      "ownerId": "user_123",
+      "opts": { "numItems": 20, "cursor": null }
+    }
+  }'
+```
+
+```json First page response
+{
+  "result": {
+    "page": [
+      { "_id": "019078e5-...", "title": "Buy milk", "ownerId": "user_123" },
+      { "_id": "019078e4-...", "title": "Walk dog", "ownerId": "user_123" }
+    ],
+    "isDone": false,
+    "continueCursor": "eyJfa..."
+  }
+}
+```
+
+```bash Next page
+curl -X POST /api/query/paginatedTodos \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "args": {
+      "ownerId": "user_123",
+      "opts": { "numItems": 20, "cursor": "eyJfa..." }
+    }
+  }'
+```
+
+```json Last page response
+{
+  "result": {
+    "page": [
+      { "_id": "019078e3-...", "title": "Read book", "ownerId": "user_123" }
+    ],
+    "isDone": true,
+    "continueCursor": "eyJmZ..."
+  }
+}
+```
+
+</CodeGroup>
+
+**TypeScript client example — fetching all pages:**
+
+```typescript
+async function fetchAllTodos(ownerId: string) {
+  const allTodos = []
+  let cursor: string | null = null
+
+  do {
+    const response = await fetch('/api/query/paginatedTodos', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        args: { ownerId, opts: { numItems: 50, cursor } },
+      }),
+    })
+
+    const { result } = await response.json()
+    allTodos.push(...result.page)
+    cursor = result.isDone ? null : result.continueCursor
+  } while (cursor !== null)
+
+  return allTodos
+}
+```
+
+<Note>
+  When the planned React SDK is available, `usePaginatedQuery()` will handle cursor management automatically — including accumulating pages, tracking `isDone`, and exposing a `loadMore()` function — making it straightforward to implement infinite scroll patterns without manually threading cursors.
+</Note>

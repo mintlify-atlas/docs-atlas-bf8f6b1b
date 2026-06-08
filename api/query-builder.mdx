@@ -1,0 +1,250 @@
+---
+title: "QueryBuilder — Filter, Order, and Paginate Documents"
+sidebarTitle: "QueryBuilder"
+description: "The Baseflare QueryBuilder returned by ctx.db.query() and createQueryBuilder() provides a fluent API for filtering, ordering, limiting, and paginating D1 documents."
+---
+
+`ctx.db.query(table)` returns a `QueryBuilder`. You chain filter, order, and limit methods on it, then terminate the chain with a collector method such as `.collect()`, `.first()`, or `.paginate()`. Under the hood the builder compiles your filter object into a parameterized SQLite `WHERE` clause using `json_extract()` expressions, submits it to D1, deserializes the rows, and runs them through your `read` permission rule before returning results to the handler.
+
+## `createQueryBuilder(table)`
+
+`createQueryBuilder` is also exported from `baseflare/server` for direct use in utilities or tests. It returns a `QueryBuilder` with an additional `.toSQL()` method so you can inspect the generated SQL without an executor attached:
+
+```typescript
+import { createQueryBuilder } from 'baseflare/server'
+
+const { sql, params } = createQueryBuilder('todos')
+  .filter({ completed: false })
+  .order('_createdAt', 'desc')
+  .limit(10)
+  .toSQL()
+
+// sql:    "SELECT _id, _data FROM todos WHERE json_extract(_data, '$.completed') IS ? ORDER BY _id DESC LIMIT ?"
+// params: [0, 10]
+```
+
+<Note>
+  A `QueryBuilder` created via `createQueryBuilder` without an executor is not
+  connected to a database. Calling `.collect()` or other terminal methods on it
+  will throw. This variant is intended for SQL inspection and unit tests.
+</Note>
+
+---
+
+## Chaining Methods
+
+All chaining methods return a **new** `QueryBuilder` — the original is never mutated and can be branched and reused.
+
+### `.filter(filterObject)`
+
+Adds filter conditions. Multiple `.filter()` calls are ANDed together. See the [FilterObject format](#filterobject-format) section for the full filter syntax.
+
+```typescript
+filter(filter: FilterObject): QueryBuilder
+```
+
+### `.order(direction)`
+
+Order results by `_id` (which encodes creation time), ascending or descending.
+
+```typescript
+order(direction: 'asc' | 'desc'): QueryBuilder
+```
+
+### `.order(field, direction)`
+
+Order results by a specific document field. When ordering by a user field, a secondary `ORDER BY _id` tiebreaker is appended automatically to guarantee stable pagination. Passing `'_id'` or `'_createdAt'` as the field name orders by the row's primary key.
+
+```typescript
+order(field: string, direction: 'asc' | 'desc'): QueryBuilder
+```
+
+### `.limit(n)`
+
+Cap the maximum number of rows returned. Must be a non-negative integer.
+
+```typescript
+limit(n: number): QueryBuilder
+```
+
+---
+
+## Collector Methods
+
+Collector methods execute the query and return results. They require a live database executor (i.e. a `QueryBuilder` obtained from `ctx.db.query()`).
+
+### `.collect()`
+
+Fetch all documents matching the current query state. Permission rules are applied row-by-row; documents that fail the `read` rule are filtered out silently.
+
+```typescript
+collect(): Promise<Doc[]>
+```
+
+### `.first()`
+
+Return the first matching document, or `null` if none exist. Internally applies `.limit(1)` before executing.
+
+```typescript
+first(): Promise<Doc | null>
+```
+
+### `.unique()`
+
+Return exactly one matching document. Throws a `ValidationError` if zero or two or more documents are returned. Useful when you expect a uniqueness constraint and want an explicit failure instead of a silent empty result.
+
+```typescript
+unique(): Promise<Doc>
+```
+
+### `.take(n)`
+
+Shorthand for `.limit(n).collect()`.
+
+```typescript
+take(n: number): Promise<Doc[]>
+```
+
+### `.count()`
+
+Return the number of documents matching the current filter. Permission-aware: only documents that pass the `read` rule are counted.
+
+```typescript
+count(): Promise<number>
+```
+
+### `.paginate(options)`
+
+Cursor-based pagination. Returns a page of results plus a continuation cursor.
+
+```typescript
+paginate(options: PaginationOptions): Promise<PaginationResult<Doc>>
+```
+
+<ParamField path="options.numItems" type="number" required>
+  Number of items per page. Must be a positive integer.
+</ParamField>
+
+<ParamField path="options.cursor" type="string">
+  Opaque cursor string from a previous `.paginate()` call. Omit or pass `undefined`
+  to start from the beginning.
+</ParamField>
+
+<ResponseField name="result.page" type="Doc[]">
+  The documents for this page.
+</ResponseField>
+
+<ResponseField name="result.isDone" type="boolean">
+  `true` when there are no more pages after this one.
+</ResponseField>
+
+<ResponseField name="result.continueCursor" type="string">
+  Opaque cursor to pass as `options.cursor` in the next call.
+</ResponseField>
+
+---
+
+## `FilterObject` Format
+
+A `FilterObject` is a plain object where keys are field names and values describe the match condition.
+
+### Equality
+
+```typescript
+// Single equality filter
+ctx.db.query('todos').filter({ completed: false })
+
+// Multiple fields are ANDed together
+ctx.db.query('todos').filter({ ownerId: 'user_123', completed: false })
+```
+
+### Comparison operators
+
+Use an object value to apply comparison operators. Supported operators: `eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `in`.
+
+```typescript
+// Greater-than / less-than
+ctx.db.query('orders').filter({ amount: { gte: 100, lt: 500 } })
+
+// Not equal
+ctx.db.query('todos').filter({ status: { neq: 'archived' } })
+
+// IN list (up to 100 values)
+ctx.db.query('todos').filter({ status: { in: ['open', 'in_progress'] } })
+```
+
+### `_createdAt` range filters
+
+`_createdAt` supports only `gt`, `gte`, `lt`, `lte` with millisecond epoch timestamps. Equality (`eq`, `neq`, `in`) is not supported.
+
+```typescript
+const oneDayAgo = Date.now() - 86_400_000
+ctx.db.query('events').filter({ _createdAt: { gte: oneDayAgo } })
+```
+
+### Logical combinators
+
+`AND`, `OR`, and `NOT` allow composing multiple filter objects:
+
+```typescript
+ctx.db.query('todos').filter({
+  OR: [
+    { completed: true },
+    { ownerId: 'user_123' },
+  ],
+})
+
+ctx.db.query('todos').filter({
+  NOT: { completed: true },
+})
+```
+
+<Note>
+  SQLite's query planner automatically selects the best index based on your
+  filter conditions. You never need to hint which index to use — Baseflare
+  never exposes index selection to the application layer.
+</Note>
+
+---
+
+## Complete Example
+
+```typescript
+import { query, mutation } from 'baseflare/server'
+import { v } from 'baseflare/values'
+
+// Paginated list with filtering and ordering
+export const listTodos = query({
+  args: {
+    cursor: v.string().optional(),
+    completed: v.boolean().optional(),
+  },
+  handler: async (ctx, { cursor, completed }) => {
+    let q = ctx.db.query('todos').order('_createdAt', 'desc')
+
+    if (completed !== undefined) {
+      q = q.filter({ completed })
+    }
+
+    return q.paginate({ numItems: 20, cursor })
+  },
+})
+
+// Count with a filter
+export const countOpenTodos = query({
+  args: { ownerId: v.string() },
+  handler: async (ctx, { ownerId }) => {
+    return ctx.db.query('todos')
+      .filter({ ownerId, completed: false })
+      .count()
+  },
+})
+
+// Fetch a unique document by a field value
+export const getTodoBySlug = query({
+  args: { slug: v.string() },
+  handler: async (ctx, { slug }) => {
+    return ctx.db.query('todos').filter({ slug }).unique()
+  },
+})
+```

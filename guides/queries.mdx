@@ -1,0 +1,135 @@
+---
+title: "Read Data with Baseflare Queries"
+sidebarTitle: "Queries"
+description: "Define read-only server functions with query(). Use the fluent query builder to filter, order, paginate, and count documents from D1 with full permission enforcement."
+---
+
+Queries are read-only server functions that run inside a `QueryCtx`. The context provides `ctx.db` (a `DatabaseReader`) for accessing documents and `ctx.auth` for the caller's identity. Queries cannot write to the database — any attempt to call a write method inside a query is a TypeScript error. Permission rules are enforced automatically: documents that the caller is not allowed to read are silently excluded from results.
+
+## Defining a Query
+
+Use `query()` from `baseflare/server` to declare a query. Supply `args` (a shape of validators), an optional `returns` validator, and a `handler` function that receives a typed `ctx` and the validated `args`:
+
+```typescript
+import { query } from 'baseflare/server'
+import { v } from 'baseflare/values'
+
+export const listTodos = query({
+  args: {
+    ownerId: v.string(),
+  },
+  returns: v.array(v.any()),
+  async handler(ctx, args) {
+    return await ctx.db
+      .query('todos')
+      .filter({ ownerId: args.ownerId })
+      .order('_createdAt', 'desc')
+      .limit(50)
+      .collect()
+  },
+})
+```
+
+The `handler` is typed end-to-end: `args.ownerId` is inferred as `string` from the validator, and the return type is checked against `returns` at runtime.
+
+## Query Builder Methods
+
+`ctx.db.query(tableName)` returns a fluent `QueryBuilder`. All methods except the terminal methods return a new builder, making the API fully chainable. The query is not executed until a terminal method is called.
+
+| Method | Returns | Description |
+|---|---|---|
+| `.filter(FilterObject)` | `QueryBuilder` | Narrow results by field values |
+| `.order(field, 'asc' \| 'desc')` | `QueryBuilder` | Order results by a field. Use `_createdAt` to order by document creation time. |
+| `.order('asc' \| 'desc')` | `QueryBuilder` | Order results by `_id` (creation order) |
+| `.limit(n)` | `QueryBuilder` | Cap the number of results returned |
+| `.collect()` | `Promise<Doc[]>` | Fetch all matching documents |
+| `.first()` | `Promise<Doc \| null>` | First result, or `null` if none |
+| `.unique()` | `Promise<Doc>` | Throws if the result count is not exactly one |
+| `.take(n)` | `Promise<Doc[]>` | Shorthand for `.limit(n).collect()` |
+| `.count()` | `Promise<number>` | Count of matching documents (permission-aware) |
+| `.paginate(options)` | `Promise<PaginationResult>` | Cursor-based pagination |
+
+Ordering by `_createdAt` is equivalent to ordering by `_id` — both use the UUIDv7 primary key, which encodes the creation timestamp in its most-significant bits.
+
+## Filtering
+
+Pass a `FilterObject` to `.filter()`. A plain field-value pair performs an equality check. Multiple fields in the same object are combined with `AND`.
+
+```typescript
+// Equality
+ctx.db.query('todos').filter({ completed: false })
+
+// Multiple fields (AND)
+ctx.db.query('todos').filter({ ownerId: 'user_123', completed: false })
+```
+
+For range comparisons and other operators, use an operator object as the field value:
+
+```typescript
+// Greater than / less than
+ctx.db.query('todos').filter({ priority: { gte: 3 } })
+
+// IN list (up to 100 values)
+ctx.db.query('todos').filter({ status: { in: ['open', 'in_progress'] } })
+```
+
+Supported operators are `eq`, `neq`, `gt`, `gte`, `lt`, `lte`, and `in`. Logical operators `AND`, `OR`, and `NOT` are available as top-level keys for compound filters:
+
+```typescript
+ctx.db.query('todos').filter({
+  OR: [
+    { completed: true },
+    { priority: { gte: 5 } },
+  ],
+})
+```
+
+## `ctx.db.get(table, id)`
+
+For direct primary-key lookups, use `ctx.db.get`. It returns the document or `null` if not found. Permission rules are applied — a document you cannot read is returned as `null`.
+
+```typescript
+const todo = await ctx.db.get('todos', todoId)
+```
+
+## Pagination
+
+Use `.paginate(options)` for cursor-based pagination. Import `paginationOptsValidator` from `baseflare/values` to type the pagination argument in your function:
+
+```typescript
+import { query } from 'baseflare/server'
+import { paginationOptsValidator } from 'baseflare/values'
+
+export const paginatedTodos = query({
+  args: { opts: paginationOptsValidator },
+  async handler(ctx, args) {
+    return await ctx.db
+      .query('todos')
+      .paginate(args.opts)
+  },
+})
+// Returns: { page: Doc[], isDone: boolean, continueCursor: string }
+```
+
+Pass `{ numItems: n }` for the first page and `{ numItems: n, cursor: continueCursor }` for subsequent pages. When `isDone` is `true`, there are no more results.
+
+<Note>
+  Permission rules are enforced on **every query** — documents the caller cannot read are silently excluded from results. This means `.count()` returns the number of documents the caller is permitted to see, `.unique()` may throw if a permission exclusion reduces the visible set below or above one, and `.first()` may return `null` even when unpermissioned documents exist.
+</Note>
+
+## Internal Queries
+
+Use `internalQuery` from `baseflare/server` to define queries that can only be called from the server — they are not exposed to the public API and cannot be invoked from the client SDK:
+
+```typescript
+import { internalQuery } from 'baseflare/server'
+
+export const adminListAll = internalQuery({
+  args: {},
+  async handler(ctx) {
+    return await ctx.db.query('todos').collect()
+  },
+})
+```
+
+Internal queries are useful for server-to-server orchestration, scheduled tasks, and admin operations where you do not want the function reachable from a browser or mobile client.
